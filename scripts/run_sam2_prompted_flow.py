@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+"""
+Run flow tracking using SAM2 propagation seeded by a classic or SAM2 prompt.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import sys
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from bubble_tracking.flow_tracking import (
+    PreprocessConfig,
+    SegmentationConfig,
+    TrackingConfig,
+    load_roi_json,
+    preprocess_frame,
+    segment_frame,
+    track_frames,
+)
+from bubble_tracking.frame_io import save_mask, sorted_frame_paths
+from bubble_tracking.sam2_adapter import create_runner
+from bubble_tracking.schemas import ObjectPrompt, PointPrompt, PromptSpec
+from bubble_tracking.visualization import create_tracking_video
+
+
+def _frame_index_from_path(path: str) -> int:
+    match = re.search(r"(\d+)\.(?:jpg|jpeg|png)$", Path(path).name, re.IGNORECASE)
+    if not match:
+        raise ValueError(f"Failed to parse frame index from {path}")
+    return int(match.group(1))
+
+
+def _apply_roi(frame: np.ndarray, roi: Optional[dict]) -> Tuple[np.ndarray, Tuple[int, int]]:
+    if roi is None:
+        return frame, (0, 0)
+    x1, y1, x2, y2 = roi["x1"], roi["y1"], roi["x2"], roi["y2"]
+    return frame[y1:y2, x1:x2], (x1, y1)
+
+
+def _load_roi_mask(mask_path: str, shape: tuple) -> np.ndarray:
+    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise ValueError(f"Failed to read ROI mask: {mask_path}")
+    if mask.shape[:2] != shape[:2]:
+        raise ValueError("ROI mask size does not match frame size")
+    return mask
+
+
+def _roi_mask_from_json(roi: dict, shape: tuple) -> np.ndarray:
+    mask = np.zeros(shape[:2], dtype=np.uint8)
+    mask[roi["y1"]:roi["y2"], roi["x1"]:roi["x2"]] = 255
+    return mask
+
+
+def _should_log(idx: int, total: int, log_every: int) -> bool:
+    if log_every <= 0:
+        return False
+    if idx == total - 1:
+        return True
+    return (idx % log_every) == 0
+
+
+def _classic_prompt(
+    frame_paths: List[str],
+    reference_full: np.ndarray,
+    roi: Optional[dict],
+    roi_mask: Optional[np.ndarray],
+    min_area: int,
+    log_every: int,
+) -> Tuple[int, np.ndarray, Dict[str, float]]:
+    preprocess_cfg = PreprocessConfig()
+    segment_cfg = SegmentationConfig(min_area=min_area)
+    total = len(frame_paths)
+
+    if roi is not None:
+        target_x = 0.5 * (roi["x1"] + roi["x2"])
+        target_y = float(roi["y2"] - 1)
+    else:
+        h, w = reference_full.shape[:2]
+        target_x = 0.5 * w
+        target_y = float(h - 1)
+
+    for idx, path in enumerate(frame_paths):
+        frame_full = cv2.imread(path)
+        if frame_full is None:
+            raise ValueError(f"Failed to read frame: {path}")
+        if frame_full.shape[:2] != reference_full.shape[:2]:
+            raise ValueError("Frame and reference image sizes do not match")
+
+        frame_crop, (x_off, y_off) = _apply_roi(frame_full, roi)
+        ref_crop, _ = _apply_roi(reference_full, roi)
+
+        gray = preprocess_frame(frame_crop, ref_crop, preprocess_cfg)
+        labels, components = segment_frame(gray, segment_cfg)
+        if components:
+            target_x_crop = target_x - x_off
+            target_y_crop = target_y - y_off
+            best = None
+            best_dist = None
+            for comp in components.values():
+                dx = comp.centroid[0] - target_x_crop
+                dy = comp.centroid[1] - target_y_crop
+                dist = math.hypot(dx, dy)
+                if best is None or dist < best_dist:
+                    best = comp
+                    best_dist = dist
+
+            if best is None:
+                raise RuntimeError("Failed to select a classic prompt component")
+
+            mask_crop = labels == best.label
+            if roi is None:
+                mask_full = mask_crop.astype(bool)
+            else:
+                mask_full = np.zeros(frame_full.shape[:2], dtype=bool)
+                x1, y1, x2, y2 = roi["x1"], roi["y1"], roi["x2"], roi["y2"]
+                mask_full[y1:y2, x1:x2] = mask_crop
+
+            if roi_mask is not None:
+                mask_full = mask_full & (roi_mask > 0)
+
+            prompt_info = {
+                "centroid_x": float(best.centroid[0] + x_off),
+                "centroid_y": float(best.centroid[1] + y_off),
+                "area_px": float(best.area),
+                "target_x": float(target_x),
+                "target_y": float(target_y),
+                "distance_px": float(best_dist if best_dist is not None else 0.0),
+            }
+            return idx, mask_full, prompt_info
+
+        if _should_log(idx, total, log_every):
+            print(f"[progress] stage=classic_search frame {idx + 1}/{total}")
+
+    raise RuntimeError("No classic prompt found in frames")
+
+
+def _sam2_candidates(
+    frame_bgr: np.ndarray,
+    roi_mask: Optional[np.ndarray],
+    mask_gen,
+    device: str,
+    min_area: int,
+    max_area_ratio: Optional[float],
+    mask_scale: float,
+) -> List[dict]:
+    import torch
+
+    roi_area = int((roi_mask > 0).sum()) if roi_mask is not None else frame_bgr.shape[0] * frame_bgr.shape[1]
+    if roi_mask is not None:
+        frame_bgr = frame_bgr.copy()
+        frame_bgr[roi_mask == 0] = 255
+        if roi_area == 0:
+            raise ValueError("ROI mask is empty")
+
+    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    scale = float(mask_scale)
+    if scale < 1.0:
+        frame_rgb = cv2.resize(
+            frame_rgb,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA,
+        )
+
+    if device.startswith("cuda"):
+        autocast = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    else:
+        autocast = nullcontext()
+
+    with torch.inference_mode(), autocast:
+        masks = mask_gen.generate(frame_rgb)
+
+    candidates = []
+    for m in masks:
+        mask = m["segmentation"]
+        if scale < 1.0:
+            mask = cv2.resize(
+                mask.astype(np.uint8),
+                (frame_bgr.shape[1], frame_bgr.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        area = int(mask.sum())
+        if area < min_area:
+            continue
+        if max_area_ratio is not None and roi_area > 0:
+            if area / roi_area > max_area_ratio:
+                continue
+        ys, xs = np.where(mask)
+        if ys.size == 0:
+            continue
+        cx = int(xs.mean())
+        cy = int(ys.mean())
+        candidates.append({"area": area, "centroid": (cx, cy)})
+    return candidates
+
+
+def _find_sam2_prompt(
+    frame_paths: List[str],
+    roi_mask: Optional[np.ndarray],
+    device: str,
+    checkpoint: str,
+    model_cfg: str,
+    points_per_side: int,
+    min_points_per_side: int,
+    min_area: int,
+    max_area_ratio: Optional[float],
+    mask_scale: float,
+    min_mask_scale: float,
+    start_frame: int,
+    max_search_frames: int,
+    max_prompts: int,
+    log_every: int,
+) -> Tuple[PromptSpec, int, Dict[str, float], List[dict]]:
+    try:
+        import torch
+        from sam2.build_sam import build_sam2
+        from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+    except Exception as exc:
+        raise ImportError("SAM2 is required for prompt search.") from exc
+
+    automask_model = build_sam2(model_cfg, checkpoint, device=device)
+    current_points = int(points_per_side)
+    current_scale = float(mask_scale)
+    mask_gen = SAM2AutomaticMaskGenerator(
+        automask_model,
+        points_per_side=current_points,
+        output_mode="binary_mask",
+    )
+
+    oom_events: List[dict] = []
+    end = min(len(frame_paths), start_frame + max_search_frames)
+    total = max(0, end - start_frame)
+
+    for idx in range(start_frame, end):
+        frame = cv2.imread(frame_paths[idx])
+        if frame is None:
+            raise ValueError(f"Failed to read frame: {frame_paths[idx]}")
+
+        while True:
+            try:
+                candidates = _sam2_candidates(
+                    frame_bgr=frame,
+                    roi_mask=roi_mask,
+                    mask_gen=mask_gen,
+                    device=device,
+                    min_area=min_area,
+                    max_area_ratio=max_area_ratio,
+                    mask_scale=current_scale,
+                )
+                break
+            except torch.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                old_points, old_scale = current_points, current_scale
+                if current_points > min_points_per_side:
+                    current_points = max(min_points_per_side, current_points // 2)
+                elif current_scale > min_mask_scale:
+                    current_scale = max(min_mask_scale, current_scale * 0.5)
+                else:
+                    raise
+                oom_events.append({
+                    "frame_idx": idx,
+                    "points_per_side_from": old_points,
+                    "points_per_side_to": current_points,
+                    "mask_scale_from": old_scale,
+                    "mask_scale_to": current_scale,
+                })
+                print(
+                    "[sam2] OOM during prompt search; "
+                    f"points_per_side {old_points}->{current_points}, "
+                    f"mask_scale {old_scale}->{current_scale}",
+                    file=sys.stderr,
+                )
+                mask_gen = SAM2AutomaticMaskGenerator(
+                    automask_model,
+                    points_per_side=current_points,
+                    output_mode="binary_mask",
+                )
+                continue
+
+        if candidates:
+            candidates.sort(key=lambda c: c["area"], reverse=True)
+            candidates = candidates[: max(1, max_prompts)]
+            prompts = []
+            for obj_id, c in enumerate(candidates, start=1):
+                cx, cy = c["centroid"]
+                prompts.append(ObjectPrompt(
+                    object_id=obj_id,
+                    frame_idx=idx,
+                    points=[PointPrompt(x=cx, y=cy, label=1)],
+                ))
+            spec = PromptSpec(prompts=prompts)
+            return spec, idx, {
+                "points_per_side": float(current_points),
+                "mask_scale": float(current_scale),
+            }, oom_events
+
+        if _should_log(idx - start_frame, total, log_every):
+            print(f"[progress] stage=sam2_search frame {idx + 1}/{len(frame_paths)}")
+
+    raise RuntimeError("No prompts found in search window")
+
+
+def _run_sam2_propagation(
+    frames_dir: str,
+    prompts: PromptSpec,
+    roi_mask: Optional[np.ndarray],
+    checkpoint: str,
+    model_cfg: str,
+    device: str,
+) -> Dict[int, np.ndarray]:
+    import torch
+
+    runner = create_runner(
+        checkpoint_path=checkpoint,
+        model_cfg=model_cfg,
+        device=device,
+    )
+    try:
+        _, masks_by_frame = runner.run(
+            frames_dir=frames_dir,
+            prompts=prompts,
+            output_dir=None,
+            roi_mask=roi_mask,
+        )
+    except torch.OutOfMemoryError as exc:
+        print("[sam2] OOM during propagation; consider lower resolution or smaller model.", file=sys.stderr)
+        raise exc
+    return masks_by_frame
+
+
+def _save_masks_for_frames(
+    frame_paths: List[str],
+    masks_by_frame: Dict[int, np.ndarray],
+    output_dir: str,
+) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    frame_indices = [_frame_index_from_path(p) for p in frame_paths]
+    first_frame = cv2.imread(frame_paths[0])
+    if first_frame is None:
+        raise ValueError(f"Failed to read frame: {frame_paths[0]}")
+    empty = np.zeros(first_frame.shape[:2], dtype=np.uint8)
+
+    for idx, frame_idx in enumerate(frame_indices):
+        mask = masks_by_frame.get(idx, empty)
+        save_mask(mask, os.path.join(output_dir, f"{frame_idx:06d}.png"))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="SAM2 prompted flow tracking")
+    parser.add_argument("--frames", required=True, help="Frames directory")
+    parser.add_argument("--reference", required=True, help="Zero-bubble reference image")
+    parser.add_argument("--output", required=True, help="Output directory")
+    parser.add_argument("--roi", default=None, help="ROI JSON path (x1,y1,x2,y2)")
+    parser.add_argument("--roi-mask", default=None, help="ROI mask PNG (optional polygon mask)")
+    parser.add_argument("--prompt-mode", choices=["classic", "sam2"], default="sam2")
+    parser.add_argument("--min-area", type=int, default=500, help="Min component area for classic prompt")
+    parser.add_argument("--fps", type=float, default=4.0, help="Frames per second")
+    parser.add_argument("--mm-per-pixel", type=float, default=None, help="Scale in mm per pixel")
+    parser.add_argument("--log-every", type=int, default=10, help="Log progress every N frames (0 disables)")
+    parser.add_argument("--no-video", action="store_true", help="Skip overlay video")
+    parser.add_argument("--video-fps", type=float, default=10.0, help="FPS for overlay video")
+    parser.add_argument("--overlay-dir", default=None, help="Optional directory to save overlay frames")
+    parser.add_argument("--sam2-checkpoint", default="checkpoints/sam2_hiera_tiny.pt", help="SAM2 checkpoint path")
+    parser.add_argument("--sam2-model-cfg", default="sam2_hiera_t.yaml", help="SAM2 model cfg name")
+    parser.add_argument("--sam2-device", default="cuda", help="SAM2 device (cuda or cpu)")
+    parser.add_argument("--sam2-start-frame", type=int, default=0, help="Start index for SAM2 prompt search")
+    parser.add_argument("--sam2-max-search-frames", type=int, default=200, help="Max frames to search for prompt")
+    parser.add_argument("--sam2-points-per-side", type=int, default=32, help="SAM2 automask density")
+    parser.add_argument("--sam2-min-points-per-side", type=int, default=8, help="Minimum points per side after OOM")
+    parser.add_argument("--sam2-min-area", type=int, default=20, help="Minimum SAM2 mask area")
+    parser.add_argument(
+        "--sam2-max-area-ratio",
+        type=float,
+        default=0.5,
+        help="Maximum SAM2 mask area / ROI (0 disables)",
+    )
+    parser.add_argument("--sam2-mask-scale", type=float, default=1.0, help="Scale for SAM2 automask input")
+    parser.add_argument("--sam2-min-mask-scale", type=float, default=0.25, help="Minimum mask scale after OOM")
+    parser.add_argument("--sam2-max-prompts", type=int, default=1, help="Max prompts to keep from search")
+    args = parser.parse_args()
+
+    roi = load_roi_json(args.roi) if args.roi else None
+    frame_paths = sorted_frame_paths(args.frames)
+    if not frame_paths:
+        raise ValueError(f"No frames found in {args.frames}")
+
+    reference_full = cv2.imread(args.reference)
+    if reference_full is None:
+        raise ValueError(f"Failed to read reference image: {args.reference}")
+
+    first_frame = cv2.imread(frame_paths[0])
+    if first_frame is None:
+        raise ValueError("Failed to read first frame")
+
+    roi_mask = None
+    if args.roi_mask:
+        roi_mask = _load_roi_mask(args.roi_mask, first_frame.shape)
+    elif roi is not None:
+        roi_mask = _roi_mask_from_json(roi, first_frame.shape)
+
+    max_area_ratio = args.sam2_max_area_ratio
+    if max_area_ratio is not None and max_area_ratio <= 0:
+        max_area_ratio = None
+
+    prompt_info = {}
+    oom_events: List[dict] = []
+    used_params = {}
+
+    if args.prompt_mode == "classic":
+        prompt_frame_idx, prompt_mask, prompt_info = _classic_prompt(
+            frame_paths=frame_paths,
+            reference_full=reference_full,
+            roi=roi,
+            roi_mask=roi_mask,
+            min_area=args.min_area,
+            log_every=args.log_every,
+        )
+        prompt_spec = PromptSpec(prompts=[
+            ObjectPrompt(
+                object_id=1,
+                frame_idx=prompt_frame_idx,
+                mask=prompt_mask,
+            )
+        ])
+        used_params = {"mode": "classic"}
+    else:
+        prompt_spec, prompt_frame_idx, used_params, oom_events = _find_sam2_prompt(
+            frame_paths=frame_paths,
+            roi_mask=roi_mask,
+            device=args.sam2_device,
+            checkpoint=args.sam2_checkpoint,
+            model_cfg=args.sam2_model_cfg,
+            points_per_side=args.sam2_points_per_side,
+            min_points_per_side=args.sam2_min_points_per_side,
+            min_area=args.sam2_min_area,
+            max_area_ratio=max_area_ratio,
+            mask_scale=args.sam2_mask_scale,
+            min_mask_scale=args.sam2_min_mask_scale,
+            start_frame=args.sam2_start_frame,
+            max_search_frames=args.sam2_max_search_frames,
+            max_prompts=args.sam2_max_prompts,
+            log_every=args.log_every,
+        )
+
+    masks_by_frame = _run_sam2_propagation(
+        frames_dir=args.frames,
+        prompts=prompt_spec,
+        roi_mask=roi_mask,
+        checkpoint=args.sam2_checkpoint,
+        model_cfg=args.sam2_model_cfg,
+        device=args.sam2_device,
+    )
+
+    sam2_masks_dir = os.path.join(args.output, "sam2_masks")
+    _save_masks_for_frames(frame_paths, masks_by_frame, sam2_masks_dir)
+
+    frame_indices = [_frame_index_from_path(p) for p in frame_paths]
+    prompt_frame_number = frame_indices[prompt_frame_idx] if prompt_frame_idx < len(frame_indices) else prompt_frame_idx
+    os.makedirs(args.output, exist_ok=True)
+    config_out = {
+        "frames_dir": os.path.abspath(args.frames),
+        "reference": os.path.abspath(args.reference),
+        "roi_json": os.path.abspath(args.roi) if args.roi else None,
+        "roi_mask": os.path.abspath(args.roi_mask) if args.roi_mask else None,
+        "prompt_mode": args.prompt_mode,
+        "prompt_frame_idx": int(prompt_frame_idx),
+        "prompt_frame_number": int(prompt_frame_number),
+        "prompt_info": prompt_info,
+        "sam2_checkpoint": args.sam2_checkpoint,
+        "sam2_model_cfg": args.sam2_model_cfg,
+        "sam2_device": args.sam2_device,
+        "sam2_search": {
+            "start_frame": args.sam2_start_frame,
+            "max_search_frames": args.sam2_max_search_frames,
+            "points_per_side": args.sam2_points_per_side,
+            "min_points_per_side": args.sam2_min_points_per_side,
+            "min_area": args.sam2_min_area,
+            "max_area_ratio": max_area_ratio,
+            "mask_scale": args.sam2_mask_scale,
+            "min_mask_scale": args.sam2_min_mask_scale,
+            "max_prompts": args.sam2_max_prompts,
+            "used_params": used_params,
+            "oom_events": oom_events,
+        },
+    }
+    with open(os.path.join(args.output, "sam2_prompted_flow_config.json"), "w") as f:
+        json.dump(config_out, f, indent=2)
+
+    tracking_cfg = TrackingConfig(
+        fps=args.fps,
+        mm_per_pixel=args.mm_per_pixel,
+        log_every=args.log_every,
+        segment=SegmentationConfig(min_area=args.min_area),
+    )
+    outputs = track_frames(
+        frames_dir=args.frames,
+        reference_path=args.reference,
+        output_dir=args.output,
+        masks_dir=sam2_masks_dir,
+        roi=roi,
+        config=tracking_cfg,
+    )
+
+    if not args.no_video:
+        output_path = Path(args.output) / "tracking_overlay.mp4"
+        create_tracking_video(
+            frames_dir=args.frames,
+            masks_dir=outputs["masks_dir"],
+            result=outputs["result"],
+            output_path=str(output_path),
+            fps=args.video_fps,
+            alpha=0.4,
+            overlay_dir=args.overlay_dir,
+        )
+
+    print("Tracking complete.")
+    print(f"Prompt mode: {args.prompt_mode}")
+    print(f"Prompt frame: {prompt_frame_number}")
+    print(f"Objects: {outputs['result'].num_objects}")
+    print(f"Events: {outputs['event_summary']}")
+    print(f"Masks: {outputs['masks_dir']}")
+
+
+if __name__ == "__main__":
+    main()
