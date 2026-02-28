@@ -78,6 +78,12 @@ wget -O checkpoints/sam2_hiera_tiny.pt \
   https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_tiny.pt
 ```
 
+Create data and ouptputs directory.
+```bash
+mkdir -p data
+mkdir -p outputs
+```
+
 Build OpenCV with CUDA support for faster flow computation (Optional):
 ```bash
 cd third_party
