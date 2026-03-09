@@ -312,21 +312,21 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --fps 4 \
   --label-units mm_s
 
-# whole pipeline rerun with centroid delta
+# case1 air1 whole pipeline rerun with centroid delta
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 /home/aaron/Downloads/bubble_tracking/venv311/bin/python scripts/run_sam2_prompted_flow.py \
   --frames data/bubbles/frames_0p5 \
   --reference data/bubbles/frames_0p5/000001.jpg \
-  --output outputs/sam2_cv_keyframe100_nonorm_centroid_delta \
+  --output outputs/case1_air1_sam2_cv_keyframe160_nonorm_centroid_delta \
   --roi data/interim/bubbles_air1_072_271/roi_0p5.json \
   --roi-mask data/interim/bubbles_air1_072_271/roi_mask_0p5.png \
   --prompt-mode sam2 \
-  --sam2-checkpoint checkpoints/sam2_hiera_base_plus.pt \
-  --sam2-model-cfg sam2_hiera_b+.yaml \
+  --sam2-checkpoint checkpoints/sam2_hiera_tiny.pt \
+  --sam2-model-cfg sam2_hiera_t.yaml \
   --sam2-device cuda \
   --cv-keyframe-prompts \
-  --cv-keyframe-interval 100 \
-  --cv-keyframe-start-idx 0 \
+  --cv-keyframe-interval 160 \
+  --cv-keyframe-start-idx 80 \
   --cv-keyframe-preprocess-mode default \
   --cv-keyframe-diff-sigma 0.5 \
   --cv-keyframe-no-normalize \
@@ -340,9 +340,9 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --mm-per-pixel 0.0856
 
 /home/aaron/Downloads/bubble_tracking/venv311/bin/python scripts/export_velocity_overlay.py \
-  --run-dir outputs/sam2_cv_keyframe100_nonorm_centroid_delta \
+  --run-dir outputs/case1_air1_sam2_cv_keyframe160_nonorm_centroid_delta \
   --frames data/bubbles/frames_0p5 \
-  --output outputs/sam2_cv_keyframe100_nonorm_centroid_delta/velocity_overlay.mp4 \
+  --output outputs/case1_air1_sam2_cv_keyframe160_nonorm_centroid_delta/velocity_overlay.mp4 \
   --fps 4 \
   --label-units mm_s
 
@@ -442,5 +442,42 @@ python scripts/export_velocity_overlay.py \
   --run-dir outputs/case3_air1_sam2_cv_keyframe100_nonorm_centroid_delta \
   --frames data/bubbles/case3_air1/frames_0p5 \
   --output outputs/case3_air1_sam2_cv_keyframe100_nonorm_centroid_delta/velocity_overlay.mp4 \
+  --fps 4 \
+  --label-units mm_s
+
+# case 3 air 4
+python scripts/copy_and_compress_frames.py
+
+python scripts/run_sam2_prompted_flow.py \
+  --frames data/bubbles/case3_air4/frames_0p5 \
+  --reference data/bubbles/case3_air1/frames_0p5/000001.jpg \
+  --output outputs/case3_air4_sam2_cv_keyframe100_nonorm_centroid_delta \
+  --roi data/interim/case3_air1/roi_0p5.json \
+  --roi-mask data/interim/case3_air1/roi_mask_0p5.png \
+  --prompt-mode sam2 \
+  --sam2-checkpoint checkpoints/sam2_hiera_base_plus.pt \
+  --sam2-model-cfg sam2_hiera_b+.yaml  \
+  --sam2-device cuda \
+  --cv-keyframe-prompts \
+  --cv-keyframe-interval 100 \
+  --cv-keyframe-start-idx 0 \
+  --cv-keyframe-preprocess-mode default \
+  --cv-keyframe-diff-sigma 0.5 \
+  --cv-keyframe-no-normalize \
+  --cv-keyframe-min-area 50 \
+  --cv-keyframe-threshold-offset 7 \
+  --cv-keyframe-debug-dir outputs/case3_air4_sam2_cv_keyframe100_nonorm_centroid_delta/cv_keyframe_debug \
+  --use-flow \
+  --velocity-mode centroid_delta \
+  --preprocess-mode raw \
+  --preprocess-raw-sigma 1.0 \
+  --fps 4 \
+  --mm-per-pixel 0.0856
+
+
+python scripts/export_velocity_overlay.py \
+  --run-dir outputs/case3_air4_sam2_cv_keyframe100_nonorm_centroid_delta \
+  --frames data/bubbles/case3_air1/frames_0p5 \
+  --output outputs/case3_air4_sam2_cv_keyframe100_nonorm_centroid_delta/velocity_overlay.mp4 \
   --fps 4 \
   --label-units mm_s

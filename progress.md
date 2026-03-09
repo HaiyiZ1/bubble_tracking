@@ -351,3 +351,67 @@
 - `src/bubble_tracking/flow_tracking.py`
 - `scripts/run_flow_tracking.py`
 - `scripts/run_sam2_prompted_flow.py`
+
+### Session: 2026-03-09 (Velocity normalized plots)
+- **Status:** complete
+- Actions taken:
+  - Added `scripts/plot_velocity_norm_summary.py`.
+  - Generated requested plots for:
+    - `outputs/case2_air1_sam2_cv_keyframe100_nonorm_centroid_delta`
+    - `outputs/case3_air1_sam2_cv_keyframe100_nonorm_centroid_delta`
+    - `outputs/case3_air4_sam2_cv_keyframe100_nonorm_centroid_delta`
+- Generated files per run:
+  - `velocity_norm_histograms.png`
+  - `velocity_area_scatter.png`
+  - `bubble_velocity_area_metrics.csv`
+- Updated velocity histogram plotting to automatic binning (`--bins auto`) and regenerated all three run visualizations.
+- Generated log-axis scatter variants (`logx`, `logxy`) for case2_air1, case3_air1, case3_air4 run directories.
+
+### Session: 2026-03-09 (Velocity PDF + distribution fit)
+- **Status:** complete
+- Actions taken:
+  - Extended `scripts/plot_velocity_norm_summary.py` with PDF overlays and parametric distribution fitting.
+  - Added outputs:
+    - `velocity_norm_pdf_fit.png`
+    - `velocity_distribution_fit.csv`
+    - `velocity_distribution_best.json`
+  - Regenerated fit outputs for:
+    - `outputs/case3_air1_sam2_cv_keyframe100_nonorm_centroid_delta`
+    - `outputs/case3_air4_sam2_cv_keyframe100_nonorm_centroid_delta`
+  - Confirmed best-fit family across case1/case2/case3 runs is Student's t for all normalized velocity components.
+
+### Files modified
+- `scripts/plot_velocity_norm_summary.py`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-03-09 (Scatter best-fit line)
+- **Status:** complete
+- Actions taken:
+  - Added best-fit line overlay to all velocity-area scatter subplots.
+  - Added legend entry with `R²` on each subplot.
+  - Regenerated plot outputs for:
+    - `case1_air1_sam2_cv_keyframe160_nonorm_centroid_delta`
+    - `case2_air1_sam2_cv_keyframe100_nonorm_centroid_delta`
+    - `case3_air1_sam2_cv_keyframe100_nonorm_centroid_delta`
+    - `case3_air4_sam2_cv_keyframe100_nonorm_centroid_delta`
+
+### Files modified
+- `scripts/plot_velocity_norm_summary.py`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-03-09 (Add log-y scatter output)
+- **Status:** complete
+- Actions taken:
+  - Added `velocity_area_scatter_logy.png` generation to `plot_velocity_norm_summary.py`.
+  - Regenerated plots for:
+    - `case1_air1_sam2_cv_keyframe160_nonorm_centroid_delta`
+    - `case2_air1_sam2_cv_keyframe100_nonorm_centroid_delta`
+    - `case3_air1_sam2_cv_keyframe100_nonorm_centroid_delta`
+    - `case3_air4_sam2_cv_keyframe100_nonorm_centroid_delta`
+
+### Files modified
+- `scripts/plot_velocity_norm_summary.py`
+- `findings.md`
+- `progress.md`

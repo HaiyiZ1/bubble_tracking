@@ -238,3 +238,42 @@
 
 ### Deferred
 - Advanced `event_reprompt` and `sam2_global_union_reprompt` branches were not reintroduced in this recovery pass because the active case2/case3 pipeline uses CV-keyframe prompts and centroid-delta velocity.
+
+## Velocity-Normalized Plotting (2026-03-09)
+- Added `scripts/plot_velocity_norm_summary.py` for Phase 3 velocity visualizations.
+- Outputs per run:
+  - `velocity_norm_histograms.png` (4 subplots):
+    - `v_x / v_ref_1`, `v_y / v_ref_1`, `v_x / v_ref_2`, `v_y / v_ref_2`
+  - `velocity_area_scatter.png` (2 subplots):
+    - `max(V / v_ref_1)` vs `(area_per_bubble / roi_area)`
+    - `max(V / v_ref_2)` vs `(area_per_bubble / roi_area)`
+- Implementation details:
+  - `max(V / v_ref_i)` is computed per bubble using max `velocity_mag_mm_s` across its lifecycle.
+  - `area_per_bubble` currently uses `max(area_px)` per bubble lifecycle (configurable with `--area-stat`).
+  - `roi_area` is resolved from `sam2_prompted_flow_config.json` (`roi_mask` preferred, then `roi_json` bbox).
+- Updated `scripts/plot_velocity_norm_summary.py` histogram binning to support automatic bin selection (`--bins auto`, now default) and regenerated outputs for all three runs.
+- Extended `plot_velocity_norm_summary.py` scatter outputs:
+  - `velocity_area_scatter.png` (linear axes)
+  - `velocity_area_scatter_logx.png` (log x)
+  - `velocity_area_scatter_logxy.png` (log x + log y)
+- For log plots, non-positive points are filtered and dropped count is annotated per subplot.
+
+## Velocity PDF Fitting (2026-03-09)
+- Extended `scripts/plot_velocity_norm_summary.py` to estimate empirical density + fitted PDFs for normalized velocity components.
+- Added output artifacts per run:
+  - `velocity_norm_pdf_fit.png` (hist density + KDE + best-fit PDF overlay)
+  - `velocity_distribution_fit.csv` (top-3 fits by AIC for each variable)
+  - `velocity_distribution_best.json` (rank-1 distribution for each variable)
+- Candidate distributions: `norm`, `laplace`, `logistic`, `cauchy`, `t`.
+- Fitting metric: AIC (ranking), with BIC and KS test exported for diagnostics.
+- Across current case runs (`case1_air1`, `case2_air1`, `case3_air1`, `case3_air4`), the best family is consistently Student's t for all four normalized components.
+
+## Scatter Trendline Update (2026-03-09)
+- Updated `scripts/plot_velocity_norm_summary.py` scatter plots to include a best-fit line on each subplot.
+- Fit behavior by axis mode:
+  - linear axes: linear fit in `(x, y)`
+  - log-y: linear fit in `(x, log10(y))`
+  - log-x: linear fit in `(log10(x), y)`
+  - log-x/log-y: linear fit in `(log10(x), log10(y))` (power-law in original axes)
+- Legend now shows `best fit (R²=...)` for each subplot.
+- Added a new scatter export: `velocity_area_scatter_logy.png` (x linear, y log).

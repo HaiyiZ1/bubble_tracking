@@ -313,3 +313,64 @@ python scripts/export_velocity_overlay.py \
 6. **Mask-only Topology Event Analysis (without flow ID tracking)**
 - `src/bubble_tracking/mask_events.py`
   - `analyze_masks_dir()` computes area timeseries and topology events directly from mask transitions.
+
+## Flag Reference: `run_sam2_prompted_flow.py` (Case 2 Command)
+
+The command below is the current recommended Phase 3 run pattern:
+
+```bash
+python scripts/run_sam2_prompted_flow.py \
+  --frames data/bubbles/case2_air1/frames_0p5 \
+  --reference data/bubbles/case2_air1/frames_0p5/000001.jpg \
+  --output outputs/case2_air1_sam2_cv_keyframe100_nonorm_centroid_delta \
+  --roi data/interim/case2_air1/roi_0p5.json \
+  --roi-mask data/interim/case2_air1/roi_mask_0p5.png \
+  --prompt-mode sam2 \
+  --sam2-checkpoint checkpoints/sam2_hiera_base_plus.pt \
+  --sam2-model-cfg sam2_hiera_b+.yaml \
+  --sam2-device cuda \
+  --cv-keyframe-prompts \
+  --cv-keyframe-interval 100 \
+  --cv-keyframe-start-idx 127 \
+  --cv-keyframe-preprocess-mode default \
+  --cv-keyframe-diff-sigma 0.5 \
+  --cv-keyframe-no-normalize \
+  --cv-keyframe-min-area 50 \
+  --cv-keyframe-threshold-offset 7 \
+  --cv-keyframe-debug-dir outputs/case2_air1_sam2_cv_keyframe100_nonorm_centroid_delta/cv_keyframe_debug \
+  --use-flow \
+  --velocity-mode centroid_delta \
+  --preprocess-mode raw \
+  --preprocess-raw-sigma 1.0 \
+  --fps 4 \
+  --mm-per-pixel 0.0856
+```
+
+### Flag meanings
+
+| Flag | Meaning |
+|---|---|
+| `--frames` | Input frame directory (ordered image sequence). |
+| `--reference` | Zero-bubble reference frame used for preprocessing/flow stage. |
+| `--output` | Output run directory for masks, tracks, events, summaries, and videos. |
+| `--roi` | Rectangular ROI JSON (`x1,y1,x2,y2`) used for crop/coordinate scope. |
+| `--roi-mask` | Polygon ROI mask PNG for precise in-ROI filtering. |
+| `--prompt-mode sam2` | Use SAM2-based prompting path instead of classic single-component prompt. |
+| `--sam2-checkpoint` | SAM2 model weights file (`.pt`). |
+| `--sam2-model-cfg` | SAM2 model config name. If Hydra cannot resolve short name, use `configs/sam2/sam2_hiera_b+.yaml`. |
+| `--sam2-device cuda` | Run SAM2 on GPU. |
+| `--cv-keyframe-prompts` | Enable CV segmentation at keyframes and feed those masks to SAM2 as prompts. |
+| `--cv-keyframe-interval 100` | Keyframe spacing for re-prompting (every 100 frames). |
+| `--cv-keyframe-start-idx 127` | Start keyframe prompting at frame index 127. |
+| `--cv-keyframe-preprocess-mode default` | CV keyframe preprocessing mode (separate from tracking preprocess mode). |
+| `--cv-keyframe-diff-sigma 0.5` | Gaussian smoothing sigma for keyframe diff image. |
+| `--cv-keyframe-no-normalize` | Disable normalization in CV keyframe preprocessing (reduces grain/noise amplification). |
+| `--cv-keyframe-min-area 50` | Minimum connected-component area kept as CV prompt mask. |
+| `--cv-keyframe-threshold-offset 7` | Threshold offset used in histogram-based CV segmentation. |
+| `--cv-keyframe-debug-dir` | Directory to save keyframe debug artifacts (overlay, mask, preprocessed image). |
+| `--use-flow` | Enable optical flow during association/tracking. |
+| `--velocity-mode centroid_delta` | Compute velocity from centroid displacement between linked frames. |
+| `--preprocess-mode raw` | Tracking-stage preprocessing mode (`raw` avoids extra normalization). |
+| `--preprocess-raw-sigma 1.0` | Smoothing sigma used by raw preprocessing mode. |
+| `--fps 4` | Frame rate used for time and velocity conversion. |
+| `--mm-per-pixel 0.0856` | Physical calibration scale for velocity/area in metric units. |

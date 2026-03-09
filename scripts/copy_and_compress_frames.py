@@ -32,11 +32,16 @@ def prepare_case(raw_dir: str, out_root: str):
 
     print(f"{out_root}: wrote {n} frames")
 
+# prepare_case(
+#     "/home/aaron/Downloads/case2_1204_soft_low porosity_cyclic/case2_1204_soft_low porosity_cyclic/Air 1",
+#     "data/bubbles/case2_air1",
+# )
+# prepare_case(
+#     "/home/aaron/Downloads/case3_20250904_90degree_1/case3_20250904_90degree_1/Air1",
+#     "data/bubbles/case3_air1",
+# )
+
 prepare_case(
-    "/home/aaron/Downloads/case2_1204_soft_low porosity_cyclic/case2_1204_soft_low porosity_cyclic/Air 1",
-    "data/bubbles/case2_air1",
-)
-prepare_case(
-    "/home/aaron/Downloads/case3_20250904_90degree_1/case3_20250904_90degree_1/Air1",
-    "data/bubbles/case3_air1",
+    "/home/aaron/Downloads/case3_20250904_90degree_1/case3_20250904_90degree_1/Air4",
+    "data/bubbles/case3_air4",
 )
