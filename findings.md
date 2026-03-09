@@ -207,3 +207,34 @@
 ---
 *Update this file after every 2 view/browser/search operations*
 *This prevents visual information from being lost*
+
+## Recovery Findings (2026-03-09)
+- `scripts/run_sam2_prompted_flow.py` had reverted to an older 539-line version (prompt-once only).
+- `src/bubble_tracking/flow_tracking.py` had lost:
+  - `raw` preprocess mode,
+  - `use_flow` toggle,
+  - `velocity_mode` (`centroid_delta`) support.
+- `scripts/run_flow_tracking.py` had lost matching CLI flags for the above runtime options.
+
+### Restored (Core)
+- `src/bubble_tracking/flow_tracking.py`
+  - Added `PreprocessConfig.raw_sigma`.
+  - Added `TrackingConfig.use_flow` and `TrackingConfig.velocity_mode`.
+  - Added raw-diff preprocess path (no light-map normalization).
+  - Added centroid-delta velocity updater for one-to-one associations.
+  - Added flow-disabled path (identity overlap matching) and runtime metadata fields.
+- `scripts/run_flow_tracking.py`
+  - Restored CLI: `--preprocess-mode raw`, `--preprocess-raw-sigma`, `--use-flow/--no-use-flow`, `--velocity-mode`.
+- `scripts/run_sam2_prompted_flow.py`
+  - Restored CLI + logic for `--cv-keyframe-prompts`.
+  - Restored CV keyframe segmentation options:
+    `--cv-keyframe-interval`, `--cv-keyframe-start-idx`,
+    `--cv-keyframe-preprocess-mode`, `--cv-keyframe-diff-sigma`,
+    `--cv-keyframe-use-clahe`, `--cv-keyframe-disable-light-map`,
+    `--cv-keyframe-no-normalize`, `--cv-keyframe-min-area`,
+    `--cv-keyframe-threshold-offset`.
+  - Restored keyframe debug outputs: `--cv-keyframe-debug-dir` with overlay/mask/preprocessed images.
+  - Restored tracking-stage options passthrough: `--use-flow`, `--velocity-mode`, `--preprocess-mode`, `--preprocess-raw-sigma`.
+
+### Deferred
+- Advanced `event_reprompt` and `sam2_global_union_reprompt` branches were not reintroduced in this recovery pass because the active case2/case3 pipeline uses CV-keyframe prompts and centroid-delta velocity.

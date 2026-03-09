@@ -163,3 +163,24 @@ Phase 5
 - Update phase status as you progress: pending -> in_progress -> complete
 - Re-read this plan before major decisions
 - Log all errors and threshold assumptions
+
+## Session: 2026-03-09 Recovery (Post-overwrite)
+
+### Recovery Phase A: Loss Audit
+- [x] Verify which files reverted after overwrite
+- [x] Confirm missing features against current run commands (case2/case3)
+- **Status:** complete
+
+### Recovery Phase B: Reapply Core Runtime Features
+- [x] Restore raw preprocess mode + sigma control in tracking core
+- [x] Restore flow on/off control and velocity source mode (`flow_median` / `centroid_delta`)
+- [x] Restore SAM2 CV-keyframe prompt mode in `run_sam2_prompted_flow.py`
+- [x] Restore CV keyframe debug overlay export option
+- [ ] Re-implement advanced event/global reprompt modes (deferred unless needed)
+- **Status:** in_progress
+
+### Recovery Phase C: Validate and Resume Runs
+- [x] Syntax check patched files
+- [x] Confirm CLI flags required by current case2/case3 commands
+- [ ] Run full end-to-end tracking on case2/case3 (user runtime)
+- **Status:** in_progress

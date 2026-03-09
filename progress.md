@@ -325,3 +325,29 @@
 
 ---
 *Update after completing each phase or encountering errors*
+
+## Session: 2026-03-09 (Recovery after script overwrite)
+
+### Recovery Audit
+- **Status:** complete
+- Actions taken:
+  - Confirmed `run_sam2_prompted_flow.py` reverted to older prompt-once version.
+  - Confirmed missing runtime features in `flow_tracking.py` and `run_flow_tracking.py`.
+
+### Recovery Implementation
+- **Status:** complete (core)
+- Actions taken:
+  - Patched `src/bubble_tracking/flow_tracking.py` to restore raw preprocess, flow toggle, and centroid-delta velocity.
+  - Patched `scripts/run_flow_tracking.py` to expose restored CLI controls.
+  - Patched `scripts/run_sam2_prompted_flow.py` to restore CV-keyframe prompt workflow and debug overlays.
+
+### Verification
+- **Status:** complete
+- Actions taken:
+  - `python -m py_compile src/bubble_tracking/flow_tracking.py scripts/run_flow_tracking.py scripts/run_sam2_prompted_flow.py`
+  - Verified help output with venv Python includes restored flags for both scripts.
+
+### Files modified
+- `src/bubble_tracking/flow_tracking.py`
+- `scripts/run_flow_tracking.py`
+- `scripts/run_sam2_prompted_flow.py`

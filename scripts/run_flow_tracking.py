@@ -398,9 +398,27 @@ def main() -> None:
     parser.add_argument("--grid-cols", type=int, default=5, help="Light matrix grid cols")
     parser.add_argument(
         "--preprocess-mode",
-        choices=["default", "automatrix"],
+        choices=["raw", "default", "automatrix"],
         default="default",
         help="Preprocess mode (automatrix matches picture_automatrix.py)",
+    )
+    parser.add_argument(
+        "--preprocess-raw-sigma",
+        type=float,
+        default=1.0,
+        help="Gaussian sigma used in raw preprocess mode (0 disables blur)",
+    )
+    parser.add_argument(
+        "--use-flow",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable optical flow for association and velocity estimation",
+    )
+    parser.add_argument(
+        "--velocity-mode",
+        choices=["flow_median", "centroid_delta"],
+        default="flow_median",
+        help="Per-object velocity source",
     )
     parser.add_argument("--use-clahe", action="store_true", help="Enable CLAHE on normalized diff")
     parser.add_argument("--clahe-clip-limit", type=float, default=2.0, help="CLAHE clip limit")
@@ -589,11 +607,14 @@ def main() -> None:
         flow_backend=args.flow_backend,
         cuda_device=args.cuda_device,
         log_every=args.log_every,
+        use_flow=args.use_flow,
+        velocity_mode=args.velocity_mode,
         preprocess=PreprocessConfig(
             diff_sigma=args.diff_sigma,
             grid_rows=args.grid_rows,
             grid_cols=args.grid_cols,
             mode=args.preprocess_mode,
+            raw_sigma=args.preprocess_raw_sigma,
             use_clahe=args.use_clahe,
             clahe_clip_limit=args.clahe_clip_limit,
             clahe_tile_grid=tuple(args.clahe_tile_grid),
@@ -646,6 +667,8 @@ def main() -> None:
 
     print("Tracking complete.")
     print(f"Flow backend: {outputs['flow_backend']}")
+    print(f"Flow enabled: {args.use_flow}")
+    print(f"Velocity mode: {args.velocity_mode}")
     print(f"Objects: {outputs['result'].num_objects}")
     print(f"Events: {outputs['event_summary']}")
     print(f"Masks: {outputs['masks_dir']}")

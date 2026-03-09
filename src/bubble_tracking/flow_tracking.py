@@ -35,6 +35,7 @@ class PreprocessConfig:
     clahe_clip_limit: float = 2.0
     clahe_tile_grid: Tuple[int, int] = (8, 8)
     mode: str = "default"
+    raw_sigma: float = 1.0
 
 
 @dataclass
@@ -86,6 +87,8 @@ class TrackingConfig:
     flow_backend: str = "auto"
     cuda_device: int = 0
     log_every: int = 10
+    use_flow: bool = True
+    velocity_mode: str = "flow_median"
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     segment: SegmentationConfig = field(default_factory=SegmentationConfig)
     flow: FlowConfig = field(default_factory=FlowConfig)
@@ -363,6 +366,8 @@ def preprocess_frame_with_debug(
     cfg: PreprocessConfig,
 ) -> dict:
     mode = (cfg.mode or "default").lower()
+    if mode == "raw":
+        return _preprocess_frame_raw_with_debug(frame_bgr, reference_bgr, cfg)
     if mode == "automatrix":
         return _preprocess_frame_automatrix_with_debug(frame_bgr, reference_bgr, cfg)
     if mode != "default":
@@ -405,6 +410,24 @@ def _preprocess_frame_default_with_debug(
         "diff": diff,
         "adjusted": adjusted,
         "light_map": light_map,
+    }
+
+
+def _preprocess_frame_raw_with_debug(
+    frame_bgr: np.ndarray,
+    reference_bgr: np.ndarray,
+    cfg: PreprocessConfig,
+) -> dict:
+    # Minimal preprocessing for flow: raw frame-reference difference without light-map normalization.
+    diff = frame_bgr.astype(np.float32) - reference_bgr.astype(np.float32)
+    if cfg.raw_sigma > 0:
+        diff = cv2.GaussianBlur(diff, (0, 0), sigmaX=cfg.raw_sigma, sigmaY=cfg.raw_sigma)
+    diff_gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+    normalized = np.clip(diff_gray + 128.0, 0, 255).astype(np.uint8)
+    return {
+        "normalized": normalized,
+        "diff": diff,
+        "diff_gray": diff_gray,
     }
 
 
@@ -831,6 +854,42 @@ def _update_prev_velocities(
             frame_data.velocity = (vx, vy)
 
 
+def _update_prev_velocities_from_centroids(
+    prev_components: Dict[int, Component],
+    curr_components: Dict[int, Component],
+    parents_to_children: Dict[int, List[int]],
+    children_to_parents: Dict[int, List[int]],
+    prev_id_map: Dict[int, int],
+    curr_id_map: Dict[int, int],
+    result: TrackingResult,
+    frame_idx: int,
+    fps: float,
+) -> None:
+    # Only assign centroid-delta velocity on one-to-one links (no split/merge ambiguity).
+    for child_id, parent_ids in children_to_parents.items():
+        if len(parent_ids) != 1:
+            continue
+        parent_id = parent_ids[0]
+        if len(parents_to_children.get(parent_id, [])) != 1:
+            continue
+        prev_obj_id = prev_id_map.get(parent_id)
+        curr_obj_id = curr_id_map.get(child_id)
+        if prev_obj_id is None or curr_obj_id is None or prev_obj_id != curr_obj_id:
+            continue
+        prev_comp = prev_components.get(parent_id)
+        curr_comp = curr_components.get(child_id)
+        if prev_comp is None or curr_comp is None:
+            continue
+        vx = (float(curr_comp.centroid[0]) - float(prev_comp.centroid[0])) * fps
+        vy = (float(curr_comp.centroid[1]) - float(prev_comp.centroid[1])) * fps
+        obj = result.objects.get(int(curr_obj_id))
+        if obj is None:
+            continue
+        frame_data = obj.frames.get(frame_idx)
+        if frame_data is not None:
+            frame_data.velocity = (vx, vy)
+
+
 def save_tracks_csv(
     result: TrackingResult,
     output_path: str,
@@ -903,6 +962,9 @@ def track_frames(
     config: Optional[TrackingConfig] = None,
 ) -> dict:
     cfg = config or TrackingConfig()
+    valid_velocity_modes = {"flow_median", "centroid_delta"}
+    if cfg.velocity_mode not in valid_velocity_modes:
+        raise ValueError(f"velocity_mode must be one of {sorted(valid_velocity_modes)}")
     frame_paths = sorted_frame_paths(frames_dir)
     if not frame_paths:
         raise ValueError(f"No frames found in {frames_dir}")
@@ -960,7 +1022,7 @@ def track_frames(
     prev_id_map: Dict[int, int] = {}
     prev_flow = None
     next_id = 1
-    flow_engine = FlowEngine(cfg)
+    flow_engine = FlowEngine(cfg) if cfg.use_flow else None
 
     for frame_idx, frame_path in enumerate(frame_paths):
         frame_full = cv2.imread(frame_path)
@@ -997,7 +1059,13 @@ def track_frames(
             prev_raw_frame_idx = frame_idx
             continue
 
-        flow_prev_raw_to_curr = flow_engine.compute(prev_raw_gray, gray)
+        if cfg.use_flow:
+            if flow_engine is None:
+                raise RuntimeError("Flow engine is not initialized")
+            flow_prev_raw_to_curr = flow_engine.compute(prev_raw_gray, gray)
+        else:
+            # Identity warp for overlap-only matching/persistence when flow is disabled.
+            flow_prev_raw_to_curr = np.zeros((gray.shape[0], gray.shape[1], 2), dtype=np.float32)
 
         confirmed_labels, confirmed_components = _confirm_persistent_components(
             prev_labels=prev_raw_labels,
@@ -1021,20 +1089,22 @@ def track_frames(
         })
 
         stage = "segment"
-        if (
-            prev_confirmed_labels is not None
-            and prev_confirmed_frame_idx is not None
-            and prev_flow is not None
-        ):
-            _update_prev_velocities(
-                prev_confirmed_labels,
-                prev_id_map,
-                prev_flow,
-                result,
-                prev_confirmed_frame_idx,
-                cfg.fps,
-            )
-            warped_prev = _warp_labels(prev_confirmed_labels, prev_flow)
+        if prev_confirmed_labels is not None and prev_confirmed_frame_idx is not None:
+            if cfg.use_flow and prev_flow is not None:
+                if cfg.velocity_mode == "flow_median":
+                    _update_prev_velocities(
+                        prev_confirmed_labels,
+                        prev_id_map,
+                        prev_flow,
+                        result,
+                        prev_confirmed_frame_idx,
+                        cfg.fps,
+                    )
+                warped_prev = _warp_labels(prev_confirmed_labels, prev_flow)
+                stage = "flow+match"
+            else:
+                warped_prev = prev_confirmed_labels
+                stage = "match"
             overlap = _overlap_counts(warped_prev, confirmed_labels)
             prev_areas = {pid: comp.area for pid, comp in prev_confirmed_components.items()}
             curr_areas = {cid: comp.area for cid, comp in confirmed_components.items()}
@@ -1044,7 +1114,6 @@ def track_frames(
                 curr_areas=curr_areas,
                 cfg=cfg.match,
             )
-            stage = "flow+match"
         else:
             parents_to_children = {}
             children_to_parents = {cid: [] for cid in confirmed_components}
@@ -1060,6 +1129,23 @@ def track_frames(
                     continue
             curr_id_map[child_id] = next_id
             next_id += 1
+
+        if (
+            cfg.velocity_mode == "centroid_delta"
+            and prev_confirmed_labels is not None
+            and prev_confirmed_frame_idx is not None
+        ):
+            _update_prev_velocities_from_centroids(
+                prev_components=prev_confirmed_components,
+                curr_components=confirmed_components,
+                parents_to_children=parents_to_children,
+                children_to_parents=children_to_parents,
+                prev_id_map=prev_id_map,
+                curr_id_map=curr_id_map,
+                result=result,
+                frame_idx=prev_confirmed_frame_idx,
+                fps=cfg.fps,
+            )
 
         if prev_confirmed_labels is not None and prev_confirmed_frame_idx is not None:
             for child_id, parent_ids in children_to_parents.items():
@@ -1163,20 +1249,22 @@ def track_frames(
         })
 
         stage = "segment"
-        if (
-            prev_confirmed_labels is not None
-            and prev_confirmed_frame_idx is not None
-            and prev_flow is not None
-        ):
-            _update_prev_velocities(
-                prev_confirmed_labels,
-                prev_id_map,
-                prev_flow,
-                result,
-                prev_confirmed_frame_idx,
-                cfg.fps,
-            )
-            warped_prev = _warp_labels(prev_confirmed_labels, prev_flow)
+        if prev_confirmed_labels is not None and prev_confirmed_frame_idx is not None:
+            if cfg.use_flow and prev_flow is not None:
+                if cfg.velocity_mode == "flow_median":
+                    _update_prev_velocities(
+                        prev_confirmed_labels,
+                        prev_id_map,
+                        prev_flow,
+                        result,
+                        prev_confirmed_frame_idx,
+                        cfg.fps,
+                    )
+                warped_prev = _warp_labels(prev_confirmed_labels, prev_flow)
+                stage = "flow+match"
+            else:
+                warped_prev = prev_confirmed_labels
+                stage = "match"
             overlap = _overlap_counts(warped_prev, confirmed_labels)
             prev_areas = {pid: comp.area for pid, comp in prev_confirmed_components.items()}
             curr_areas = {cid: comp.area for cid, comp in confirmed_components.items()}
@@ -1186,7 +1274,6 @@ def track_frames(
                 curr_areas=curr_areas,
                 cfg=cfg.match,
             )
-            stage = "flow+match"
         else:
             parents_to_children = {}
             children_to_parents = {cid: [] for cid in confirmed_components}
@@ -1202,6 +1289,23 @@ def track_frames(
                     continue
             curr_id_map[child_id] = next_id
             next_id += 1
+
+        if (
+            cfg.velocity_mode == "centroid_delta"
+            and prev_confirmed_labels is not None
+            and prev_confirmed_frame_idx is not None
+        ):
+            _update_prev_velocities_from_centroids(
+                prev_components=prev_confirmed_components,
+                curr_components=confirmed_components,
+                parents_to_children=parents_to_children,
+                children_to_parents=children_to_parents,
+                prev_id_map=prev_id_map,
+                curr_id_map=curr_id_map,
+                result=result,
+                frame_idx=prev_confirmed_frame_idx,
+                fps=cfg.fps,
+            )
 
         if prev_confirmed_labels is not None and prev_confirmed_frame_idx is not None:
             for child_id, parent_ids in children_to_parents.items():
@@ -1292,10 +1396,12 @@ def track_frames(
         "summary": event_summary,
         "config": asdict(cfg),
         "runtime": {
-            "flow_backend": flow_engine.backend,
+            "flow_backend": flow_engine.backend if flow_engine is not None else "disabled",
             "flow_backend_requested": cfg.flow_backend,
             "cuda_device": int(cfg.cuda_device),
             "mask_source_dir": str(masks_dir) if masks_dir else None,
+            "flow_enabled": bool(cfg.use_flow),
+            "velocity_mode": cfg.velocity_mode,
         },
         "events": events,
     }, indent=2))
@@ -1306,5 +1412,5 @@ def track_frames(
         "event_summary": event_summary,
         "area_timeseries": area_timeseries,
         "masks_dir": str(masks_dir),
-        "flow_backend": flow_engine.backend,
+        "flow_backend": flow_engine.backend if flow_engine is not None else "disabled",
     }
