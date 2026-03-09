@@ -419,7 +419,7 @@ python scripts/run_sam2_prompted_flow.py \
   --roi-mask data/interim/case3_air1/roi_mask_0p5.png \
   --prompt-mode sam2 \
   --sam2-checkpoint checkpoints/sam2_hiera_base_plus.pt \
-  --sam2-model-cfg segment-anything-2/sam2/configs/sam2/sam2_hiera_b+.yaml \
+  --sam2-model-cfg sam2_hiera_b+.yaml  \
   --sam2-device cuda \
   --cv-keyframe-prompts \
   --cv-keyframe-interval 100 \
@@ -436,6 +436,7 @@ python scripts/run_sam2_prompted_flow.py \
   --preprocess-raw-sigma 1.0 \
   --fps 4 \
   --mm-per-pixel 0.0856
+
 
 python scripts/export_velocity_overlay.py \
   --run-dir outputs/case3_air1_sam2_cv_keyframe100_nonorm_centroid_delta \
