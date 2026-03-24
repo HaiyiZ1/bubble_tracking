@@ -258,6 +258,79 @@ python scripts/export_velocity_overlay.py \
   --label-units mm_s
 ```
 
+## Publishing Workflow (Case1-3 Air1)
+
+1. Relabel the Air1 case datasets so frame `000001` is the first usable bubble frame.
+
+```bash
+python scripts/relabel_publishing_air1.py --case case1_air1 case2_air1 case3_air1
+```
+
+This writes:
+- `data/bubbles/case1_air1_publish`
+- `data/bubbles/case2_air1_publish`
+- `data/bubbles/case3_air1_publish`
+
+Each relabeled root contains:
+- `frames/`
+- `frames_0p5/`
+- `frame_map.csv`
+- `publishing_relabel_config.json`
+
+Adjusted `--cv-keyframe-start-idx` values for the relabeled datasets:
+- case1: `10`
+- case2: `1`
+- case3: `10`
+
+2. Re-run the tracking pipeline against the relabeled dataset root you need. Example for case 2:
+
+```bash
+python scripts/run_sam2_prompted_flow.py \
+  --frames data/bubbles/case2_air1_publish/frames_0p5 \
+  --reference data/bubbles/case2_air1_publish/frames_0p5/000001.jpg \
+  --output outputs/case2_air1_publish_sam2_cv_keyframe1_nonorm_centroid_delta \
+  --roi data/interim/case2_air1/roi_0p5.json \
+  --roi-mask data/interim/case2_air1/roi_mask_0p5.png \
+  --prompt-mode sam2 \
+  --sam2-checkpoint checkpoints/sam2_hiera_base_plus.pt \
+  --sam2-model-cfg sam2_hiera_b+.yaml \
+  --sam2-device cuda \
+  --cv-keyframe-prompts \
+  --cv-keyframe-interval 100 \
+  --cv-keyframe-start-idx 1 \
+  --cv-keyframe-preprocess-mode default \
+  --cv-keyframe-diff-sigma 0.5 \
+  --cv-keyframe-no-normalize \
+  --cv-keyframe-min-area 50 \
+  --cv-keyframe-threshold-offset 7 \
+  --use-flow \
+  --velocity-mode centroid_delta \
+  --preprocess-mode raw \
+  --preprocess-raw-sigma 1.0 \
+  --fps 4 \
+  --mm-per-pixel 0.0856
+```
+
+3. Export publishing-ready tracking overlays from the completed run.
+
+```bash
+python scripts/export_publishing_tracking_video.py \
+  --case case2_air1 \
+  --run-dir outputs/case2_air1_publish_sam2_cv_keyframe1_nonorm_centroid_delta \
+  --frames data/bubbles/case2_air1_publish/frames_0p5
+```
+
+This writes:
+- `tracking_overlay_publish_1x.mp4`
+- `tracking_overlay_publish_10x.mp4`
+
+Both outputs:
+- render the case title
+- render `Time elapsed: xx.xx min.`
+- use the first 5 minutes of the relabeled sequence
+- omit the old frame counter
+- keep the mask/ID overlays from the tracking run
+
 ## Current Scripts and Logic Map
 
 ### Main scripts

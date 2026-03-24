@@ -218,6 +218,45 @@
 - **Started:** 2026-02-22
 - Actions taken:
   - Added `--masks-dir` option to `scripts/run_flow_tracking.py`
+
+## Session: 2026-03-24
+
+### Phase: Track Lineage Metadata
+- **Status:** complete
+- **Started:** 2026-03-24 19:35 AEDT
+- Actions taken:
+  - Re-read planning and brainstorming skill instructions before changing tracking behavior
+  - Extended `TrackedObject` with birth/death lifecycle metadata fields for lineage export
+  - Added a post-processing annotation pass in `src/bubble_tracking/flow_tracking.py` to map final events onto per-track birth/death reasons and parent/child IDs
+  - Preserved correctness after debounce/relink by annotating lifecycle metadata after the final mask/result rebuild
+  - Ran `venv311/bin/python -m py_compile` on the changed tracking modules and runners
+  - Ran a synthetic split -> merge -> death tracking scenario and verified the resulting lifecycle metadata in `tracks.json`
+- Files created/modified:
+  - src/bubble_tracking/schemas.py (updated)
+  - src/bubble_tracking/flow_tracking.py (updated)
+  - task_plan.md (updated)
+  - findings.md (updated)
+  - progress.md (updated)
+
+### Phase: Publishing Prep Workflow
+- **Status:** complete
+- **Started:** 2026-03-24 20:10 AEDT
+- Actions taken:
+  - Audited current case roots and confirmed case1 still points at the generic `data/bubbles` tree while case2/case3 already have dedicated roots
+  - Captured publishing presets for case1/case2/case3 Air1, including first usable frame numbers, titles, and shifted keyframe prompt indices after relabeling
+  - Added `src/bubble_tracking/publishing.py` to centralize publishing case presets
+  - Added `scripts/relabel_publishing_air1.py` to copy only the post-start frames into new relabeled publishing roots and emit `frame_map.csv` plus `publishing_relabel_config.json`
+  - Added `scripts/export_publishing_tracking_video.py` to export 1x and 10x tracking overlays with a title banner, elapsed-time text, and a 5-minute cap, without changing default pipeline video behavior
+  - Updated `README.md` with the new relabel + rerun + publishing-overlay workflow and adjusted `--cv-keyframe-start-idx` values
+  - Ran syntax checks, CLI help checks, a temp-directory relabel test, and a temp-directory publishing-overlay export test
+- Files created/modified:
+  - src/bubble_tracking/publishing.py (created)
+  - scripts/relabel_publishing_air1.py (created)
+  - scripts/export_publishing_tracking_video.py (created)
+  - README.md (updated)
+  - task_plan.md (updated)
+  - findings.md (updated)
+  - progress.md (updated)
   - Added mask/frame index alignment and SAM2 mask relabeling in `src/bubble_tracking/flow_tracking.py`
   - Re-labels SAM2 masks per frame via connected components before flow-guided matching
   - Verified test frame filenames are `000000.jpg`.. and can align to mask indices
@@ -413,5 +452,111 @@
 
 ### Files modified
 - `scripts/plot_velocity_norm_summary.py`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-03-12 (Residual saturation comparison)
+- **Status:** complete
+- Actions taken:
+  - Parsed `traditional_CV_residual_saturation_from_haiyi.csv`.
+  - Computed SAM2 metric per run as mean of last 4 `total_area_px` values divided by ROI mask area.
+  - Compared against Haiyi residual saturation values for:
+    - case1_air1, case2_air1, case3_air1, case3_air4.
+  - Observed SAM2 metric is lower than Haiyi across all four cases by ~73% to ~79%.
+
+### Files modified
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-03-15 (Birth/Death debounce for flicker)
+- **Status:** complete
+- Actions taken:
+  - Added debounce config to tracking (`DebounceConfig`) and wired into `TrackingConfig`.
+  - Implemented mask postprocess debounce in `flow_tracking.py`:
+    - suppress short ON runs (birth debounce)
+    - fill short OFF gaps (death debounce hold)
+    - recompute `area_timeseries` from debounced masks
+    - regenerate birth/death events from debounced masks
+    - rebuild track frame records from debounced masks (consistent overlays/tracks CSV)
+  - Added CLI flags to both runners:
+    - `--debounce-birth-frames`
+    - `--debounce-death-frames`
+    - `--debounce-relink-max-centroid-dist-px`
+    - `--debounce-relink-min-area-ratio`
+    - `--debounce-relink-max-area-ratio`
+  - Added gap re-link logic so short-gap reappearances can keep old IDs instead of creating new IDs.
+  - Verified with `py_compile` and `--help` checks in `venv311`.
+
+### Files modified
+- `src/bubble_tracking/flow_tracking.py`
+- `scripts/run_sam2_prompted_flow.py`
+- `scripts/run_flow_tracking.py`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-03-16 (Case1 scatter with marginal PDFs)
+- **Status:** complete
+- Actions taken:
+  - Added `scripts/plot_velocity_area_logxy_with_marginal_pdfs.py`.
+  - Generated a new non-overwriting case1 figure with:
+    - log-log scatter using only `max_v_over_v_ref_2`
+    - top PDF of x variable
+    - right PDF of y variable
+  - Output:
+    - `outputs/case1_air1_sam2_cv_keyframe160_nonorm_centroid_delta/velocity_area_scatter_logxy_vref2_with_pdfs.png`
+
+### Files modified
+- `scripts/plot_velocity_area_logxy_with_marginal_pdfs.py`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-03-16 (Label/LaTeX/title styling update)
+- **Status:** complete
+- Actions taken:
+  - Updated case1 marginal-PDF plot script with:
+    - explicit "PDF of ..." labels for both marginal PDFs
+    - mathtext/LaTeX style for title and axis labels
+    - bold main title
+  - Regenerated:
+    - `outputs/case1_air1_sam2_cv_keyframe160_nonorm_centroid_delta/velocity_area_scatter_logxy_vref2_with_pdfs.png`
+  - Confirmed original `velocity_area_scatter_logxy.png` remains unchanged.
+
+### Files modified
+- `scripts/plot_velocity_area_logxy_with_marginal_pdfs.py`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-03-18 (Per-bubble max velocity CSV export)
+- **Status:** complete
+- Actions taken:
+  - Added `scripts/export_bubble_max_velocity_summary.py`.
+  - Exported three requested summary CSVs for:
+    - `case1_air1`
+    - `case2_air1`
+    - `case3_air1`
+  - Verified headers and sample rows in all three outputs.
+  - Chosen interpretation:
+    - component maxima use absolute `x/y` speed per frame
+    - total max velocity uses the real magnitude column per frame
+    - appearance time = appearance frame count divided by `fps`
+
+### Files modified
+- `scripts/export_bubble_max_velocity_summary.py`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-03-16 (PDF coordinate labels + decimal ratio format)
+- **Status:** complete
+- Actions taken:
+  - Updated right-marginal ratio values to decimal formatting (no percent style).
+  - Added coordinate annotations for each PDF at 3 points:
+    - left end
+    - peak
+    - right end
+  - Regenerated:
+    - `outputs/case1_air1_sam2_cv_keyframe160_nonorm_centroid_delta/velocity_area_scatter_logxy_vref2_with_pdfs.png`
+
+### Files modified
+- `scripts/plot_velocity_area_logxy_with_marginal_pdfs.py`
 - `findings.md`
 - `progress.md`

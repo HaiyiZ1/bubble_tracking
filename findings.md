@@ -3,7 +3,7 @@
 ## Tracking Plan (2026-02-22)
 - Reference design: `docs/plans/2026-02-22-bubble-tracking-design.md`
 - Assumptions: zero-bubble reference image; stationary camera; FPS constant within a dataset (default 4 FPS for current), but varies across datasets; crowding increases over time with frequent merge/split events later
-- ID handling: create new ID on merge/split; terminate ID on disappearance; no lineage tracking requested
+- ID handling: create new ID on merge/split; terminate ID on disappearance; persist per-track birth/death reasons and lineage links for later visualization
 - Pipeline notes from `next_steps_26-02-21.md`:
   - Preprocess frames (CLAHE for contrast, Gaussian blur for denoise)
   - Dense optical flow per frame pair -> velocity field
@@ -52,6 +52,46 @@
 - Added CUDA Farneback flow backend with auto fallback to CPU in `src/bubble_tracking/flow_tracking.py`
 - Added CLI flags: `--flow-backend {auto,cpu}` and `--cuda-device`
 - `events.json` now includes `runtime` metadata for actual flow backend used
+
+## Lineage Metadata (2026-03-24)
+- `TrackedObject` now carries lifecycle metadata: `birth_reason`, `birth_frame_idx`, `birth_parent_ids`, `death_reason`, `death_frame_idx`, `death_child_ids`
+- Lifecycle metadata is derived from the final event list after debounce/relink processing so track annotations match the saved post-processed IDs
+- Birth reason mapping:
+  - `injection`: track appears without a split/merge parent event
+  - `split`: track is listed in a split event's `child_ids`
+  - `merge`: track is listed as a merge event's `child_id`
+- Death reason mapping:
+  - `death`: track disappears without producing split/merge children
+  - `split`: track is the parent in a split event
+  - `merge`: track is one of the parents in a merge event
+- Tracks still present in the final frame keep no death metadata because the sequence ends before an observed disappearance
+- Synthetic validation with a split -> merge -> death mask sequence confirmed the expected lineage metadata:
+  - parent track: `injection` birth, `split` death
+  - split children: `split` birth, `merge` death
+  - merged child: `merge` birth, `death` death
+
+## Publishing Prep Findings (2026-03-24)
+- Existing Air1 case roots on disk:
+  - case1 current source root is the generic `data/bubbles` tree (`frames/`, `frames_0p5/`, `map.csv`)
+  - case2 source root is `data/bubbles/case2_air1`
+  - case3 source root is `data/bubbles/case3_air1`
+- Requested inclusive first frames for relabeling:
+  - case1 Air1: original frame 71
+  - case2 Air1: original frame 127
+  - case3 Air1: original frame 215
+- Current run configs confirm the old pipeline used the unrelabelled datasets:
+  - case1 frames: `data/bubbles/frames_0p5`, prompt start idx 80
+  - case2 frames: `data/bubbles/case2_air1/frames_0p5`, prompt start idx 127
+  - case3 frames: `data/bubbles/case3_air1/frames_0p5`, prompt start idx 224
+- After relabeling, the equivalent prompt-start indices shift by the discarded-frame offsets:
+  - case1: old idx 80 -> new idx 10
+  - case2: old idx 127 -> new idx 1
+  - case3: old idx 224 -> new idx 10
+- Publishing overlays should stay separate from the tracking pipeline. Best fit is a standalone exporter that reads an existing run dir (`tracks.json` + `masks/`) plus the relabeled frames dir and writes:
+  - a 1x video at acquisition speed (`fps=4`)
+  - a 10x video at `fps=40`
+  - both capped to the first 5 minutes (`1200` frames at 4 FPS)
+- Existing `create_tracking_video()` always draws `Frame {idx}`. To keep pipeline behavior unchanged, publishing text overlays should live in a new export script rather than altering default pipeline video output.
 
 ## Progress Logging (2026-02-22)
 - Added `--log-every` CLI flag to print one progress line per N frames
@@ -277,3 +317,76 @@
   - log-x/log-y: linear fit in `(log10(x), log10(y))` (power-law in original axes)
 - Legend now shows `best fit (R²=...)` for each subplot.
 - Added a new scatter export: `velocity_area_scatter_logy.png` (x linear, y log).
+
+## Residual Saturation Comparison (2026-03-12)
+- Compared SAM2 pipeline metric vs Haiyi traditional CV metric for:
+  - `case1_air1`, `case2_air1`, `case3_air1`, `case3_air4`.
+- SAM2-side metric used:
+  - `mean(total_area_px of last 4 frames) / roi_area_px`.
+- Haiyi-side metric used:
+  - `traditional_CV_residual_saturation_from_haiyi.csv` value (last-frame total area / ROI area).
+- Results (SAM2 mean-last4 vs Haiyi):
+  - case1_air1: `0.039353876` vs `0.188410775` (−79.11%)
+  - case2_air1: `0.177874755` vs `0.816576803` (−78.22%)
+  - case3_air1: `0.134526110` vs `0.498604706` (−73.02%)
+  - case3_air4: `0.181956360` vs `0.764480873` (−76.20%)
+
+## Residual Saturation Comparison (Haiyi v2, 2026-03-12)
+- Updated source file: `traditional_CV_residual_saturation_from_haiyi_v2.csv`.
+- Compared SAM2 last-frame ratio vs Haiyi last-frame ratio:
+  - SAM2 metric: `last_frame_total_area_px / roi_area_px`.
+  - Haiyi metric: residual saturation from v2 CSV.
+- Results:
+  - case1_air1: `0.039335842` vs `0.065190128` (−39.66%)
+  - case2_air1: `0.177783975` vs `0.205777354` (−13.60%)
+  - case3_air1: `0.134695188` vs `0.149082807` (−9.65%)
+  - case3_air4: `0.181749569` vs `0.228579781` (−20.49%)
+
+## Flicker Debounce Postprocess (2026-03-15)
+- Added ID-level temporal debounce to tracking outputs (postprocess on saved instance masks):
+  - Birth debounce: suppress short-lived IDs using `birth_confirm_frames`.
+  - Death debounce: bridge short disappearances by copying previous-frame ID mask up to `death_confirm_frames - 1` gaps.
+- Implementation location:
+  - `src/bubble_tracking/flow_tracking.py`
+  - `_smooth_presence_1d()` for 1D on/off gating.
+  - `_debounce_saved_masks()` for mask rewriting + debounced area series + debounced birth/death events.
+- Exposed CLI flags in both runners:
+  - `--debounce-birth-frames`
+  - `--debounce-death-frames`
+- Notes:
+  - Default values are `1` (disabled), preserving old behavior unless explicitly enabled.
+  - Debounce rewrites saved masks, recomputes `area_timeseries`, replaces birth/death event entries with debounced ones, and rebuilds `tracks.json/csv` frame data from the debounced masks for consistency.
+  - Added ID re-linking across short gaps: if a new ID appears shortly after an old ID disappears and centroid/area are compatible, the new ID is remapped to the old ID before debounce.
+  - Re-link controls:
+    - `relink_max_centroid_dist_px` (default `20`)
+    - `relink_min_area_ratio` (default `0.35`)
+    - `relink_max_area_ratio` (default `2.8`)
+
+## Case1 LogXY + Marginal PDFs (2026-03-16)
+- Added script `scripts/plot_velocity_area_logxy_with_marginal_pdfs.py`.
+- Purpose: keep the original scatter plots unchanged and generate a separate figure containing:
+  - main log-log scatter for `x = max(V / v_ref_2)` and `y = max(area_per_bubble / roi_area)`
+  - top marginal PDF for `x`
+  - right marginal PDF for `y`
+- Output generated:
+  - `outputs/case1_air1_sam2_cv_keyframe160_nonorm_centroid_delta/velocity_area_scatter_logxy_vref2_with_pdfs.png`
+- Styling update applied:
+  - explicit marginal labels "PDF of ..." for both top/right panels
+  - mathtext/LaTeX-style labels/titles for subscripts and symbols
+  - bold main figure title
+  - added coordinate labels for three points on each PDF (left end, peak, right end)
+  - forced `max(A_bubble/A_ROI)` value formatting to decimal (`0.xx` style), not percent
+
+## Bubble Summary CSV Export (2026-03-18)
+- Added `scripts/export_bubble_max_velocity_summary.py` to export per-bubble summaries for `case1_air1`, `case2_air1`, and `case3_air1`.
+- Output files:
+  - `outputs/case1_air1_A_bubble_max_velocity.csv`
+  - `outputs/case2_air1_A_bubble_max_velocity.csv`
+  - `outputs/case3_air1_A_bubble_max_velocity.csv`
+- Column interpretation:
+  - `A_bubble_avg` = mean `area_px` over all appearances of the bubble.
+  - `A_bubble_max` = max `area_px` over all appearances.
+  - `max_velocity_x` / `max_velocity_y` use the maximum absolute component speed across frames, converted from `tracks.csv` pixel-per-second columns to pixel/frame with `fps`.
+  - `max_velocity` uses the real per-frame magnitude maximum from `velocity_mag_px_s`, then converts to pixel/frame.
+  - `time_of_appearance in s` = `frame_amount_of_appearance / fps`.
+- Note: the user prompt said "14 columns" but listed 15 headings, so the exporter writes all 15 listed fields.

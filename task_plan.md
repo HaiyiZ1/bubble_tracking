@@ -1,10 +1,10 @@
 # Task Plan: Bubble Tracking (Flow + Masks) (2026-02-22)
 
 ## Goal
-Implement the flow-guided mask tracking pipeline described in `docs/plans/2026-02-22-bubble-tracking-design.md` for bubble datasets, focusing on births, splits, merges, deaths, and per-frame area.
+Implement the flow-guided mask tracking pipeline described in `docs/plans/2026-02-22-bubble-tracking-design.md` for bubble datasets, focusing on births, splits, merges, deaths, per-frame area, and per-track lineage metadata.
 
 ## Current Phase
-Phase 7
+Phase 8
 
 ## Phases
 
@@ -29,6 +29,7 @@ Phase 7
 - [x] Save annotated overlay frames
 - [x] Save CSV/JSON of events and area
 - [x] Add per-frame progress logging (stage + processed/total)
+- [x] Annotate tracked IDs with birth/death reasons and lineage links for later visualization
 - [ ] Run on small sample; sanity check counts and runtime
 - **Status:** in_progress
 
@@ -67,6 +68,12 @@ Phase 7
 - [x] Add per-second stats + plot script for first 900 frames
 - **Status:** in_progress
 
+### Phase 8: Publishing Prep (Case1-3 Air1)
+- [x] Add a standalone relabel step that discards pre-bubble frames and rewrites case1/case2/case3 Air1 frame roots
+- [x] Add a standalone publishing overlay exporter with fixed titles, elapsed-time text, 5-minute cap, and 1x/10x outputs
+- [x] Document the adjusted prompt/frame offsets for relabeled datasets so pipeline commands can be re-run safely
+- **Status:** complete
+
 ## Assumptions
 - Zero-bubble reference image exists
 - Camera is stationary
@@ -96,6 +103,7 @@ Phase 7
 | `git rev-parse --is-inside-work-tree` failed (not a git repo) | 1 | Skipped commit for design doc |
 | SAM2 automask OOM (`torch.OutOfMemoryError` in `SAM2AutomaticMaskGenerator.generate`) | 1 | Reduce `--sam2-mask-scale`/`--sam2-points-per-side` or add `points_per_batch` tuning |
 | Full-dataset SAM2 propagation killed mid-run | 1 | Likely OOM (video frames loaded at full resolution); run in chunks or downscale |
+| Synthetic split validation produced one component instead of two | 1 | Added a 1-pixel gap between child masks so connected-components emitted a real split |
 
 ## Archived Plan (2026-02-13)
 

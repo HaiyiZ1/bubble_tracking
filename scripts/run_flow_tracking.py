@@ -17,6 +17,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from bubble_tracking.flow_tracking import (
+    DebounceConfig,
     FlowConfig,
     MatchConfig,
     PreprocessConfig,
@@ -420,6 +421,36 @@ def main() -> None:
         default="flow_median",
         help="Per-object velocity source",
     )
+    parser.add_argument(
+        "--debounce-birth-frames",
+        type=int,
+        default=1,
+        help="Require N consecutive detections before confirming a birth (1 disables)",
+    )
+    parser.add_argument(
+        "--debounce-death-frames",
+        type=int,
+        default=1,
+        help="Require N consecutive misses before confirming a death (1 disables)",
+    )
+    parser.add_argument(
+        "--debounce-relink-max-centroid-dist-px",
+        type=float,
+        default=20.0,
+        help="Max centroid distance (px) to relink a reappeared ID to a recently missing ID",
+    )
+    parser.add_argument(
+        "--debounce-relink-min-area-ratio",
+        type=float,
+        default=0.35,
+        help="Min area ratio (new/old) allowed for ID relink",
+    )
+    parser.add_argument(
+        "--debounce-relink-max-area-ratio",
+        type=float,
+        default=2.8,
+        help="Max area ratio (new/old) allowed for ID relink",
+    )
     parser.add_argument("--use-clahe", action="store_true", help="Enable CLAHE on normalized diff")
     parser.add_argument("--clahe-clip-limit", type=float, default=2.0, help="CLAHE clip limit")
     parser.add_argument(
@@ -609,6 +640,13 @@ def main() -> None:
         log_every=args.log_every,
         use_flow=args.use_flow,
         velocity_mode=args.velocity_mode,
+        debounce=DebounceConfig(
+            birth_confirm_frames=max(1, int(args.debounce_birth_frames)),
+            death_confirm_frames=max(1, int(args.debounce_death_frames)),
+            relink_max_centroid_dist_px=float(args.debounce_relink_max_centroid_dist_px),
+            relink_min_area_ratio=float(args.debounce_relink_min_area_ratio),
+            relink_max_area_ratio=float(args.debounce_relink_max_area_ratio),
+        ),
         preprocess=PreprocessConfig(
             diff_sigma=args.diff_sigma,
             grid_rows=args.grid_rows,

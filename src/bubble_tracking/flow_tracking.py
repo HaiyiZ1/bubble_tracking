@@ -81,6 +81,19 @@ class PersistenceConfig:
 
 
 @dataclass
+class DebounceConfig:
+    # Require this many consecutive detections before a new ID is kept.
+    birth_confirm_frames: int = 1
+    # Require this many consecutive missing frames before an ID is removed.
+    death_confirm_frames: int = 1
+    # Max centroid distance (pixels) when re-linking a new ID to a recently missing ID.
+    relink_max_centroid_dist_px: float = 20.0
+    # Area ratio bounds (new/old) for ID re-linking.
+    relink_min_area_ratio: float = 0.35
+    relink_max_area_ratio: float = 2.8
+
+
+@dataclass
 class TrackingConfig:
     fps: float = 4.0
     mm_per_pixel: Optional[float] = None
@@ -94,6 +107,7 @@ class TrackingConfig:
     flow: FlowConfig = field(default_factory=FlowConfig)
     match: MatchConfig = field(default_factory=MatchConfig)
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
+    debounce: DebounceConfig = field(default_factory=DebounceConfig)
 
 
 @dataclass
@@ -953,6 +967,477 @@ def save_tracks_csv(
                 })
 
 
+def _normalize_related_ids(values: Optional[List[int]]) -> List[int]:
+    if not values:
+        return []
+    return sorted({int(v) for v in values})
+
+
+def _set_track_birth(
+    track: TrackedObject,
+    reason: str,
+    frame_idx: int,
+    parent_ids: Optional[List[int]] = None,
+) -> None:
+    new_frame_idx = int(frame_idx)
+    if track.birth_frame_idx is None or new_frame_idx < int(track.birth_frame_idx):
+        track.birth_reason = reason
+        track.birth_frame_idx = new_frame_idx
+        track.birth_parent_ids = _normalize_related_ids(parent_ids)
+        return
+    if new_frame_idx == int(track.birth_frame_idx):
+        track.birth_reason = reason
+        track.birth_parent_ids = _normalize_related_ids(parent_ids)
+
+
+def _set_track_death(
+    track: TrackedObject,
+    reason: str,
+    frame_idx: int,
+    child_ids: Optional[List[int]] = None,
+) -> None:
+    new_frame_idx = int(frame_idx)
+    if track.death_frame_idx is None or new_frame_idx > int(track.death_frame_idx):
+        track.death_reason = reason
+        track.death_frame_idx = new_frame_idx
+        track.death_child_ids = _normalize_related_ids(child_ids)
+        return
+    if new_frame_idx == int(track.death_frame_idx):
+        track.death_reason = reason
+        track.death_child_ids = _normalize_related_ids(child_ids)
+
+
+def _annotate_track_lifecycle(result: TrackingResult, events: List[dict]) -> None:
+    for obj in result.objects.values():
+        obj.birth_reason = None
+        obj.birth_frame_idx = None
+        obj.birth_parent_ids = []
+        obj.death_reason = None
+        obj.death_frame_idx = None
+        obj.death_child_ids = []
+
+    sorted_events = sorted(
+        events,
+        key=lambda e: (int(e.get("frame_idx", -1)), str(e.get("type", ""))),
+    )
+    for event in sorted_events:
+        event_type = str(event.get("type", ""))
+        frame_idx = int(event.get("frame_idx", -1))
+        if event_type == "birth":
+            track = result.objects.get(int(event["object_id"]))
+            if track is not None:
+                _set_track_birth(track, reason="injection", frame_idx=frame_idx)
+            continue
+        if event_type == "death":
+            track = result.objects.get(int(event["object_id"]))
+            if track is not None:
+                _set_track_death(track, reason="death", frame_idx=frame_idx)
+            continue
+        if event_type == "merge":
+            child_id = int(event["child_id"])
+            parent_ids = [int(v) for v in event.get("parent_ids", [])]
+            child = result.objects.get(child_id)
+            if child is not None:
+                _set_track_birth(child, reason="merge", frame_idx=frame_idx, parent_ids=parent_ids)
+            for parent_id in parent_ids:
+                parent = result.objects.get(parent_id)
+                if parent is not None:
+                    _set_track_death(parent, reason="merge", frame_idx=frame_idx, child_ids=[child_id])
+            continue
+        if event_type == "split":
+            parent_id = int(event["parent_id"])
+            child_ids = [int(v) for v in event.get("child_ids", [])]
+            parent = result.objects.get(parent_id)
+            if parent is not None:
+                _set_track_death(parent, reason="split", frame_idx=frame_idx, child_ids=child_ids)
+            for child_id in child_ids:
+                child = result.objects.get(child_id)
+                if child is not None:
+                    _set_track_birth(child, reason="split", frame_idx=frame_idx, parent_ids=[parent_id])
+
+    for obj in result.objects.values():
+        if not obj.frames:
+            continue
+        first_frame_idx = int(min(obj.frames))
+        if obj.birth_reason is None:
+            obj.birth_reason = "injection"
+            obj.birth_frame_idx = first_frame_idx
+            obj.birth_parent_ids = []
+        elif obj.birth_frame_idx is None:
+            obj.birth_frame_idx = first_frame_idx
+
+
+def _iter_runs(binary: np.ndarray, value: bool) -> List[Tuple[int, int]]:
+    runs: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    for idx, v in enumerate(binary.tolist()):
+        if bool(v) == value:
+            if start is None:
+                start = idx
+        elif start is not None:
+            runs.append((start, idx - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(binary) - 1))
+    return runs
+
+
+def _smooth_presence_1d(
+    presence: np.ndarray,
+    birth_confirm_frames: int,
+    death_confirm_frames: int,
+) -> np.ndarray:
+    smoothed = presence.copy()
+
+    on_min = max(1, int(birth_confirm_frames))
+    if on_min > 1:
+        for s, e in _iter_runs(smoothed, True):
+            if (e - s + 1) < on_min:
+                smoothed[s:e + 1] = False
+
+    # If death requires N consecutive misses, fill gaps up to N-1.
+    off_gap_max = max(0, int(death_confirm_frames) - 1)
+    if off_gap_max > 0:
+        for s, e in _iter_runs(smoothed, False):
+            run_len = e - s + 1
+            has_left = s > 0 and bool(smoothed[s - 1])
+            has_right = e < (len(smoothed) - 1) and bool(smoothed[e + 1])
+            if has_left and has_right and run_len <= off_gap_max:
+                smoothed[s:e + 1] = True
+
+    return smoothed
+
+
+def _build_gap_relink_aliases(
+    result: TrackingResult,
+    cfg: DebounceConfig,
+) -> Dict[int, int]:
+    max_gap = max(0, int(cfg.death_confirm_frames) - 1)
+    if max_gap <= 0:
+        return {}
+
+    tracks: Dict[int, dict] = {}
+    for obj_id, obj in result.objects.items():
+        if not obj.frames:
+            continue
+        frame_ids = sorted(obj.frames.keys())
+        first_idx = int(frame_ids[0])
+        last_idx = int(frame_ids[-1])
+        first = obj.frames[first_idx]
+        last = obj.frames[last_idx]
+        tracks[int(obj_id)] = {
+            "first_idx": first_idx,
+            "last_idx": last_idx,
+            "first_centroid": (float(first.centroid[0]), float(first.centroid[1])),
+            "last_centroid": (float(last.centroid[0]), float(last.centroid[1])),
+            "first_area": float(first.area),
+            "last_area": float(last.area),
+        }
+
+    candidates: List[Tuple[float, int, int]] = []
+    obj_ids = sorted(tracks.keys())
+    for old_id in obj_ids:
+        old = tracks[old_id]
+        for new_id in obj_ids:
+            if new_id == old_id:
+                continue
+            new = tracks[new_id]
+            if new["first_idx"] <= old["last_idx"]:
+                continue
+            gap = int(new["first_idx"] - old["last_idx"] - 1)
+            if gap < 0 or gap > max_gap:
+                continue
+            dx = float(new["first_centroid"][0] - old["last_centroid"][0])
+            dy = float(new["first_centroid"][1] - old["last_centroid"][1])
+            dist = float(np.hypot(dx, dy))
+            if dist > float(cfg.relink_max_centroid_dist_px):
+                continue
+            area_old = max(1.0, float(old["last_area"]))
+            area_ratio = float(new["first_area"] / area_old)
+            if area_ratio < float(cfg.relink_min_area_ratio) or area_ratio > float(cfg.relink_max_area_ratio):
+                continue
+            score = dist + 5.0 * float(gap)
+            candidates.append((score, int(old_id), int(new_id)))
+
+    candidates.sort(key=lambda x: x[0])
+    alias: Dict[int, int] = {}
+    used_old: set[int] = set()
+    used_new: set[int] = set()
+    for _, old_id, new_id in candidates:
+        if old_id in used_old or new_id in used_new:
+            continue
+        alias[new_id] = old_id
+        used_old.add(old_id)
+        used_new.add(new_id)
+    return alias
+
+
+def _collapse_alias_map(alias_map: Dict[int, int]) -> Dict[int, int]:
+    if not alias_map:
+        return {}
+
+    def _root(x: int) -> int:
+        seen: set[int] = set()
+        cur = int(x)
+        while cur in alias_map and cur not in seen:
+            seen.add(cur)
+            nxt = int(alias_map[cur])
+            if nxt == cur:
+                break
+            cur = nxt
+        return cur
+
+    collapsed: Dict[int, int] = {}
+    for src in list(alias_map.keys()):
+        dst = _root(src)
+        if dst != src:
+            collapsed[int(src)] = int(dst)
+    return collapsed
+
+
+def _apply_aliases_to_mask(mask: np.ndarray, alias_map: Dict[int, int]) -> np.ndarray:
+    if not alias_map:
+        return mask
+    out = mask.copy()
+    for src, dst in alias_map.items():
+        src_i = int(src)
+        dst_i = int(dst)
+        if src_i == dst_i:
+            continue
+        out[mask == src_i] = dst_i
+    return out
+
+
+def _remap_event_ids(event: dict, alias_map: Dict[int, int]) -> dict:
+    if not alias_map:
+        return event
+
+    def _map_id(v: int) -> int:
+        cur = int(v)
+        seen: set[int] = set()
+        while cur in alias_map and cur not in seen:
+            seen.add(cur)
+            nxt = int(alias_map[cur])
+            if nxt == cur:
+                break
+            cur = nxt
+        return cur
+
+    out = dict(event)
+    if "object_id" in out:
+        out["object_id"] = int(_map_id(int(out["object_id"])))
+    if "parent_id" in out:
+        out["parent_id"] = int(_map_id(int(out["parent_id"])))
+    if "child_id" in out:
+        out["child_id"] = int(_map_id(int(out["child_id"])))
+    if "parent_ids" in out and isinstance(out["parent_ids"], list):
+        out["parent_ids"] = [int(_map_id(int(v))) for v in out["parent_ids"]]
+    if "child_ids" in out and isinstance(out["child_ids"], list):
+        out["child_ids"] = [int(_map_id(int(v))) for v in out["child_ids"]]
+    return out
+
+
+def _debounce_saved_masks(
+    masks_dir: Path,
+    total_frames: int,
+    cfg: DebounceConfig,
+    log_every: int,
+    id_alias_map: Optional[Dict[int, int]] = None,
+) -> Tuple[List[dict], List[dict]]:
+    if total_frames <= 0:
+        return [], []
+    birth_confirm = max(1, int(cfg.birth_confirm_frames))
+    death_confirm = max(1, int(cfg.death_confirm_frames))
+    if birth_confirm <= 1 and death_confirm <= 1:
+        return [], []
+    alias_map = _collapse_alias_map(id_alias_map or {})
+
+    frame_present_ids: List[np.ndarray] = []
+    all_ids: set[int] = set()
+
+    for frame_idx in range(total_frames):
+        mask_path = masks_dir / f"{frame_idx:06d}.png"
+        mask = load_mask(str(mask_path))
+        if alias_map:
+            mask = _apply_aliases_to_mask(mask, alias_map)
+        ids = np.unique(mask)
+        ids = ids[ids > 0].astype(np.int32)
+        frame_present_ids.append(ids)
+        for oid in ids.tolist():
+            all_ids.add(int(oid))
+
+    if not all_ids:
+        empty_series = [
+            {
+                "frame_idx": int(frame_idx),
+                "total_area_px": 0,
+                "num_components": 0,
+                "largest_component_area_px": 0,
+            }
+            for frame_idx in range(total_frames)
+        ]
+        return empty_series, []
+
+    presence_by_id: Dict[int, np.ndarray] = {
+        oid: np.zeros(total_frames, dtype=bool) for oid in sorted(all_ids)
+    }
+    for frame_idx, ids in enumerate(frame_present_ids):
+        for oid in ids.tolist():
+            presence_by_id[int(oid)][frame_idx] = True
+
+    smoothed_by_id: Dict[int, np.ndarray] = {}
+    for oid, presence in presence_by_id.items():
+        smoothed_by_id[oid] = _smooth_presence_1d(
+            presence=presence,
+            birth_confirm_frames=birth_confirm,
+            death_confirm_frames=death_confirm,
+        )
+
+    area_timeseries: List[dict] = []
+    bd_events: List[dict] = []
+    prev_out: Optional[np.ndarray] = None
+    prev_present: set[int] = set()
+    prev_area_by_id: Dict[int, int] = {}
+
+    for frame_idx in range(total_frames):
+        mask_path = masks_dir / f"{frame_idx:06d}.png"
+        raw = load_mask(str(mask_path))
+        orig = _apply_aliases_to_mask(raw, alias_map) if alias_map else raw
+        out = orig.copy()
+
+        orig_ids = frame_present_ids[frame_idx].tolist()
+        for oid in orig_ids:
+            if not bool(smoothed_by_id[int(oid)][frame_idx]):
+                out[out == int(oid)] = 0
+
+        curr_ids = np.unique(out)
+        curr_ids = curr_ids[curr_ids > 0].astype(np.int32)
+        curr_present: set[int] = set(int(v) for v in curr_ids.tolist())
+
+        if prev_out is not None and prev_present:
+            fill_ids = [
+                oid
+                for oid in prev_present
+                if oid not in curr_present and bool(smoothed_by_id.get(oid, np.zeros(total_frames, dtype=bool))[frame_idx])
+            ]
+            if fill_ids:
+                if len(fill_ids) == 1:
+                    fill_id = int(fill_ids[0])
+                    fill_mask = (prev_out == fill_id) & (out == 0)
+                    out[fill_mask] = fill_id
+                else:
+                    fill_src = np.isin(prev_out, np.asarray(fill_ids, dtype=prev_out.dtype))
+                    fill_mask = fill_src & (out == 0)
+                    out[fill_mask] = prev_out[fill_mask]
+                curr_ids = np.unique(out)
+                curr_ids = curr_ids[curr_ids > 0].astype(np.int32)
+                curr_present = set(int(v) for v in curr_ids.tolist())
+
+        if not np.array_equal(out, raw):
+            save_mask(out, str(mask_path))
+
+        fg = (out > 0).astype(np.uint8)
+        total_area = int(fg.sum())
+        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+        largest = int(stats[1:, cv2.CC_STAT_AREA].max()) if n_labels > 1 else 0
+        area_timeseries.append({
+            "frame_idx": int(frame_idx),
+            "total_area_px": total_area,
+            "num_components": int(max(0, n_labels - 1)),
+            "largest_component_area_px": largest,
+        })
+
+        ids_now, counts_now = np.unique(out, return_counts=True)
+        curr_area_by_id: Dict[int, int] = {
+            int(oid): int(cnt)
+            for oid, cnt in zip(ids_now.tolist(), counts_now.tolist())
+            if int(oid) > 0
+        }
+
+        births = curr_present - prev_present
+        deaths = prev_present - curr_present
+        prev_idx = int(max(0, frame_idx - 1))
+        for oid in sorted(births):
+            bd_events.append({
+                "type": "birth",
+                "prev_frame_idx": prev_idx,
+                "frame_idx": int(frame_idx),
+                "object_id": int(oid),
+                "area_px": int(curr_area_by_id.get(int(oid), 0)),
+            })
+        for oid in sorted(deaths):
+            bd_events.append({
+                "type": "death",
+                "prev_frame_idx": prev_idx,
+                "frame_idx": int(frame_idx),
+                "object_id": int(oid),
+                "area_px": int(prev_area_by_id.get(int(oid), 0)),
+            })
+
+        prev_out = out
+        prev_present = curr_present
+        prev_area_by_id = curr_area_by_id
+
+        _log_progress(frame_idx, total_frames, "debounce", log_every)
+
+    return area_timeseries, bd_events
+
+
+def _rebuild_result_from_saved_masks(
+    result: TrackingResult,
+    masks_dir: Path,
+    total_frames: int,
+    roi_offset: Tuple[int, int],
+    fps: float,
+) -> None:
+    objects: Dict[int, TrackedObject] = {}
+    x_offset, y_offset = roi_offset
+
+    for frame_idx in range(total_frames):
+        mask_path = masks_dir / f"{frame_idx:06d}.png"
+        mask = load_mask(str(mask_path))
+        ids = np.unique(mask)
+        ids = ids[ids > 0].astype(np.int32)
+        for oid in ids.tolist():
+            yy, xx = np.where(mask == int(oid))
+            if xx.size == 0:
+                continue
+            centroid = (float(np.mean(xx)) + x_offset, float(np.mean(yy)) + y_offset)
+            bbox = BoundingBox(
+                x_min=int(np.min(xx)) + x_offset,
+                y_min=int(np.min(yy)) + y_offset,
+                x_max=int(np.max(xx)) + x_offset,
+                y_max=int(np.max(yy)) + y_offset,
+            )
+            frame_data = FrameData(
+                centroid=centroid,
+                area=int(xx.size),
+                bbox=bbox,
+            )
+            obj = objects.get(int(oid))
+            if obj is None:
+                obj = TrackedObject(object_id=int(oid))
+                objects[int(oid)] = obj
+            obj.frames[int(frame_idx)] = frame_data
+
+    # Recompute per-frame velocity via centroid delta for consecutive frames.
+    for obj in objects.values():
+        frame_ids = sorted(obj.frames.keys())
+        for i in range(len(frame_ids) - 1):
+            f0 = frame_ids[i]
+            f1 = frame_ids[i + 1]
+            if f1 != f0 + 1:
+                continue
+            p0 = obj.frames[f0].centroid
+            p1 = obj.frames[f1].centroid
+            vx = (float(p1[0]) - float(p0[0])) * fps
+            vy = (float(p1[1]) - float(p0[1])) * fps
+            obj.frames[f0].velocity = (vx, vy)
+
+    result.objects = objects
+    result.num_objects = len(objects)
+
+
 def track_frames(
     frames_dir: str,
     reference_path: str,
@@ -1023,6 +1508,7 @@ def track_frames(
     prev_flow = None
     next_id = 1
     flow_engine = FlowEngine(cfg) if cfg.use_flow else None
+    debounce_alias_count = 0
 
     for frame_idx, frame_path in enumerate(frame_paths):
         frame_full = cv2.imread(frame_path)
@@ -1375,6 +1861,37 @@ def track_frames(
 
         _log_progress(confirm_frame_idx, total_frames, stage, cfg.log_every)
 
+    if cfg.debounce.birth_confirm_frames > 1 or cfg.debounce.death_confirm_frames > 1:
+        id_alias_map = _build_gap_relink_aliases(result, cfg.debounce)
+        debounce_alias_count = int(len(id_alias_map))
+        debounced_area_timeseries, debounced_bd_events = _debounce_saved_masks(
+            masks_dir=masks_dir,
+            total_frames=total_frames,
+            cfg=cfg.debounce,
+            log_every=cfg.log_every,
+            id_alias_map=id_alias_map,
+        )
+        if debounced_area_timeseries:
+            area_timeseries = debounced_area_timeseries
+        if debounced_bd_events:
+            passthrough_events = [
+                _remap_event_ids(e, id_alias_map)
+                for e in events
+                if e.get("type") not in {"birth", "death"}
+            ]
+            events = sorted(
+                passthrough_events + debounced_bd_events,
+                key=lambda e: (int(e.get("frame_idx", -1)), str(e.get("type", ""))),
+            )
+        _rebuild_result_from_saved_masks(
+            result=result,
+            masks_dir=masks_dir,
+            total_frames=total_frames,
+            roi_offset=roi_offset,
+            fps=cfg.fps,
+        )
+
+    _annotate_track_lifecycle(result, events)
     result.num_objects = len(result.objects)
 
     tracks_path = output_root / "tracks.json"
@@ -1402,6 +1919,12 @@ def track_frames(
             "mask_source_dir": str(masks_dir) if masks_dir else None,
             "flow_enabled": bool(cfg.use_flow),
             "velocity_mode": cfg.velocity_mode,
+            "debounce_birth_confirm_frames": int(cfg.debounce.birth_confirm_frames),
+            "debounce_death_confirm_frames": int(cfg.debounce.death_confirm_frames),
+            "debounce_relink_max_centroid_dist_px": float(cfg.debounce.relink_max_centroid_dist_px),
+            "debounce_relink_min_area_ratio": float(cfg.debounce.relink_min_area_ratio),
+            "debounce_relink_max_area_ratio": float(cfg.debounce.relink_max_area_ratio),
+            "debounce_relinked_ids": int(debounce_alias_count),
         },
         "events": events,
     }, indent=2))

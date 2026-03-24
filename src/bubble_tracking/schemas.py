@@ -65,14 +65,31 @@ class TrackedObject:
     """A single tracked object across frames."""
     object_id: int
     frames: Dict[int, FrameData] = field(default_factory=dict)
+    birth_reason: Optional[str] = None
+    birth_frame_idx: Optional[int] = None
+    birth_parent_ids: List[int] = field(default_factory=list)
+    death_reason: Optional[str] = None
+    death_frame_idx: Optional[int] = None
+    death_child_ids: List[int] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "frames": {
                 str(frame_idx): frame_data.to_dict()
                 for frame_idx, frame_data in self.frames.items()
             }
         }
+        if self.birth_reason is not None:
+            result["birth_reason"] = self.birth_reason
+            if self.birth_frame_idx is not None:
+                result["birth_frame_idx"] = self.birth_frame_idx
+            result["birth_parent_ids"] = [int(v) for v in self.birth_parent_ids]
+        if self.death_reason is not None:
+            result["death_reason"] = self.death_reason
+            if self.death_frame_idx is not None:
+                result["death_frame_idx"] = self.death_frame_idx
+            result["death_child_ids"] = [int(v) for v in self.death_child_ids]
+        return result
 
     @classmethod
     def from_dict(cls, object_id: int, data: dict) -> "TrackedObject":
@@ -80,7 +97,16 @@ class TrackedObject:
             int(frame_idx): FrameData.from_dict(frame_data)
             for frame_idx, frame_data in data["frames"].items()
         }
-        return cls(object_id=object_id, frames=frames)
+        return cls(
+            object_id=object_id,
+            frames=frames,
+            birth_reason=data.get("birth_reason"),
+            birth_frame_idx=data.get("birth_frame_idx"),
+            birth_parent_ids=[int(v) for v in data.get("birth_parent_ids", [])],
+            death_reason=data.get("death_reason"),
+            death_frame_idx=data.get("death_frame_idx"),
+            death_child_ids=[int(v) for v in data.get("death_child_ids", [])],
+        )
 
 
 @dataclass
