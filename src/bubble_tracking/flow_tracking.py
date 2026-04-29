@@ -118,6 +118,26 @@ class Component:
     bbox: BoundingBox
 
 
+@dataclass
+class TrackRuntime:
+    object_id: int
+    confirmed: bool
+    first_seen_frame_idx: int
+    seen_streak: int = 1
+    miss_count: int = 0
+    first_missing_frame_idx: Optional[int] = None
+    missing_frame_indices: List[int] = field(default_factory=list)
+    pending_frame_indices: List[int] = field(default_factory=list)
+    emit_birth_event_on_confirm: bool = False
+    birth_event_emitted: bool = False
+
+
+@dataclass
+class FrameBufferEntry:
+    frame_idx: int
+    mask: np.ndarray
+
+
 class FlowEngine:
     def __init__(self, cfg: TrackingConfig):
         self.cfg = cfg
@@ -904,6 +924,252 @@ def _update_prev_velocities_from_centroids(
             frame_data.velocity = (vx, vy)
 
 
+def _update_prev_velocities_from_state_ids(
+    prev_components: Dict[int, Component],
+    prev_id_map: Dict[int, int],
+    curr_components: Dict[int, Component],
+    curr_id_map: Dict[int, int],
+    result: TrackingResult,
+    frame_idx: int,
+    fps: float,
+) -> None:
+    prev_by_obj = {
+        int(obj_id): prev_components[label_id]
+        for label_id, obj_id in prev_id_map.items()
+        if label_id in prev_components
+    }
+    curr_by_obj = {
+        int(obj_id): curr_components[label_id]
+        for label_id, obj_id in curr_id_map.items()
+        if label_id in curr_components
+    }
+    for obj_id in sorted(set(prev_by_obj) & set(curr_by_obj)):
+        prev_comp = prev_by_obj[obj_id]
+        curr_comp = curr_by_obj[obj_id]
+        vx = (float(curr_comp.centroid[0]) - float(prev_comp.centroid[0])) * fps
+        vy = (float(curr_comp.centroid[1]) - float(prev_comp.centroid[1])) * fps
+        obj = result.objects.get(int(obj_id))
+        if obj is None:
+            continue
+        frame_data = obj.frames.get(frame_idx)
+        if frame_data is not None:
+            frame_data.velocity = (vx, vy)
+
+
+def _id_mask_from_labels(labels: np.ndarray, id_map: Dict[int, int]) -> np.ndarray:
+    out = np.zeros_like(labels, dtype=np.int32)
+    for label_id, obj_id in id_map.items():
+        out[labels == int(label_id)] = int(obj_id)
+    return out
+
+
+def _build_full_id_mask(
+    id_mask_crop: np.ndarray,
+    frame_shape: Tuple[int, int],
+    roi: Optional[dict],
+) -> np.ndarray:
+    if roi is None:
+        return id_mask_crop.copy()
+    full_mask = np.zeros(frame_shape, dtype=np.int32)
+    x1, y1 = roi["x1"], roi["y1"]
+    x2, y2 = roi["x2"], roi["y2"]
+    full_mask[y1:y2, x1:x2] = id_mask_crop
+    return full_mask
+
+
+def _component_from_binary_mask(binary: np.ndarray, label: int) -> Optional[Component]:
+    yy, xx = np.where(binary)
+    if xx.size == 0:
+        return None
+    bbox = BoundingBox(
+        x_min=int(np.min(xx)),
+        y_min=int(np.min(yy)),
+        x_max=int(np.max(xx)),
+        y_max=int(np.max(yy)),
+    )
+    return Component(
+        label=int(label),
+        area=int(xx.size),
+        centroid=(float(np.mean(xx)), float(np.mean(yy))),
+        bbox=bbox,
+    )
+
+
+def _state_from_id_mask(id_mask: np.ndarray) -> Tuple[np.ndarray, Dict[int, Component], Dict[int, int]]:
+    labels = np.zeros_like(id_mask, dtype=np.int32)
+    components: Dict[int, Component] = {}
+    id_map: Dict[int, int] = {}
+    next_label = 1
+    for obj_id in sorted(int(v) for v in np.unique(id_mask) if int(v) > 0):
+        binary = id_mask == int(obj_id)
+        comp = _component_from_binary_mask(binary, next_label)
+        if comp is None:
+            continue
+        labels[binary] = int(next_label)
+        components[int(next_label)] = comp
+        id_map[int(next_label)] = int(obj_id)
+        next_label += 1
+    return labels, components, id_map
+
+
+def _update_result_from_id_mask(
+    result: TrackingResult,
+    id_mask_crop: np.ndarray,
+    frame_idx: int,
+    roi_offset: Tuple[int, int],
+) -> None:
+    x_offset, y_offset = roi_offset
+    for obj_id in sorted(int(v) for v in np.unique(id_mask_crop) if int(v) > 0):
+        binary = id_mask_crop == int(obj_id)
+        yy, xx = np.where(binary)
+        if xx.size == 0:
+            continue
+        bbox = BoundingBox(
+            x_min=int(np.min(xx)) + x_offset,
+            y_min=int(np.min(yy)) + y_offset,
+            x_max=int(np.max(xx)) + x_offset,
+            y_max=int(np.max(yy)) + y_offset,
+        )
+        frame_data = FrameData(
+            centroid=(float(np.mean(xx)) + x_offset, float(np.mean(yy)) + y_offset),
+            area=int(xx.size),
+            bbox=bbox,
+        )
+        if int(obj_id) not in result.objects:
+            result.objects[int(obj_id)] = TrackedObject(object_id=int(obj_id))
+        result.objects[int(obj_id)].frames[int(frame_idx)] = frame_data
+
+
+def _remove_result_frame(
+    result: TrackingResult,
+    obj_id: int,
+    frame_idx: int,
+) -> None:
+    obj = result.objects.get(int(obj_id))
+    if obj is None:
+        return
+    obj.frames.pop(int(frame_idx), None)
+    if not obj.frames:
+        result.objects.pop(int(obj_id), None)
+
+
+def _discard_tentative_track(
+    result: TrackingResult,
+    frame_buffer: List[FrameBufferEntry],
+    runtime: TrackRuntime,
+) -> None:
+    for frame_idx in runtime.pending_frame_indices:
+        _remove_result_frame(result, runtime.object_id, frame_idx)
+        for entry in frame_buffer:
+            if int(entry.frame_idx) == int(frame_idx):
+                entry.mask[entry.mask == int(runtime.object_id)] = 0
+
+
+def _discard_missing_grace_frames(
+    result: TrackingResult,
+    frame_buffer: List[FrameBufferEntry],
+    runtime: TrackRuntime,
+    masks_dir: Path,
+    area_timeseries: List[dict],
+) -> None:
+    for frame_idx in runtime.missing_frame_indices:
+        _remove_result_frame(result, runtime.object_id, frame_idx)
+        for entry in frame_buffer:
+            if int(entry.frame_idx) == int(frame_idx):
+                entry.mask[entry.mask == int(runtime.object_id)] = 0
+                break
+        else:
+            mask_path = masks_dir / f"{int(frame_idx):06d}.png"
+            if not mask_path.exists():
+                continue
+            mask = load_mask(str(mask_path))
+            if not np.any(mask == int(runtime.object_id)):
+                continue
+            mask = mask.copy()
+            mask[mask == int(runtime.object_id)] = 0
+            save_mask(mask, str(mask_path))
+            _update_area_timeseries_record(area_timeseries, int(frame_idx), mask)
+
+
+def _confirm_injection_track(
+    runtime: TrackRuntime,
+    result: TrackingResult,
+    events: List[dict],
+) -> None:
+    if runtime.birth_event_emitted or not runtime.emit_birth_event_on_confirm:
+        runtime.confirmed = True
+        runtime.pending_frame_indices.clear()
+        return
+    obj = result.objects.get(int(runtime.object_id))
+    if obj is None:
+        return
+    frame_data = obj.frames.get(int(runtime.first_seen_frame_idx))
+    if frame_data is None:
+        return
+    events.append({
+        "type": "birth",
+        "prev_frame_idx": int(max(0, runtime.first_seen_frame_idx - 1)),
+        "frame_idx": int(runtime.first_seen_frame_idx),
+        "object_id": int(runtime.object_id),
+        "area_px": int(frame_data.area),
+    })
+    runtime.confirmed = True
+    runtime.birth_event_emitted = True
+    runtime.pending_frame_indices.clear()
+
+
+def _make_area_timeseries_record(
+    frame_idx: int,
+    mask: np.ndarray,
+) -> dict:
+    fg = (mask > 0).astype(np.uint8)
+    total_area = int(fg.sum())
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+    largest = int(stats[1:, cv2.CC_STAT_AREA].max()) if n_labels > 1 else 0
+    return {
+        "frame_idx": int(frame_idx),
+        "total_area_px": total_area,
+        "num_components": int(max(0, n_labels - 1)),
+        "largest_component_area_px": largest,
+    }
+
+
+def _append_area_timeseries_record(
+    area_timeseries: List[dict],
+    frame_idx: int,
+    mask: np.ndarray,
+) -> None:
+    area_timeseries.append(_make_area_timeseries_record(frame_idx, mask))
+
+
+def _update_area_timeseries_record(
+    area_timeseries: List[dict],
+    frame_idx: int,
+    mask: np.ndarray,
+) -> None:
+    updated = _make_area_timeseries_record(frame_idx, mask)
+    for idx, record in enumerate(area_timeseries):
+        if int(record.get("frame_idx", -1)) == int(frame_idx):
+            area_timeseries[idx] = updated
+            return
+    area_timeseries.append(updated)
+
+
+def _flush_frame_buffer_entries(
+    frame_buffer: List[FrameBufferEntry],
+    flush_before_frame_idx: int,
+    masks_dir: Path,
+    area_timeseries: List[dict],
+    force: bool = False,
+) -> None:
+    while frame_buffer:
+        if not force and int(frame_buffer[0].frame_idx) > int(flush_before_frame_idx):
+            break
+        entry = frame_buffer.pop(0)
+        save_mask(entry.mask, str(masks_dir / f"{int(entry.frame_idx):06d}.png"))
+        _append_area_timeseries_record(area_timeseries, int(entry.frame_idx), entry.mask)
+
+
 def save_tracks_csv(
     result: TrackingResult,
     output_path: str,
@@ -1495,20 +1761,283 @@ def track_frames(
 
     frame_shape = reference_full.shape[:2]
     roi_offset = (roi["x1"], roi["y1"]) if roi else (0, 0)
+    birth_confirm = max(1, int(cfg.debounce.birth_confirm_frames))
+    death_confirm = max(1, int(cfg.debounce.death_confirm_frames))
+    buffer_lag = max(0, birth_confirm - 1)
 
     prev_raw_gray = None
     prev_raw_labels = None
     prev_raw_components: Dict[int, Component] = {}
     prev_raw_frame_idx = None
 
-    prev_confirmed_labels = None
-    prev_confirmed_components: Dict[int, Component] = {}
-    prev_confirmed_frame_idx = None
-    prev_id_map: Dict[int, int] = {}
+    prev_state_labels = None
+    prev_state_components: Dict[int, Component] = {}
+    prev_state_frame_idx = None
+    prev_state_id_map: Dict[int, int] = {}
     prev_flow = None
     next_id = 1
     flow_engine = FlowEngine(cfg) if cfg.use_flow else None
     debounce_alias_count = 0
+    tracks_runtime: Dict[int, TrackRuntime] = {}
+    frame_buffer: List[FrameBufferEntry] = []
+
+    def _process_confirmed_frame(
+        confirm_frame_idx: int,
+        confirmed_labels: np.ndarray,
+        confirmed_components: Dict[int, Component],
+    ) -> str:
+        nonlocal prev_state_labels
+        nonlocal prev_state_components
+        nonlocal prev_state_frame_idx
+        nonlocal prev_state_id_map
+        nonlocal next_id
+
+        stage = "segment"
+        if prev_state_labels is not None and prev_state_frame_idx is not None:
+            if cfg.use_flow and prev_flow is not None:
+                if cfg.velocity_mode == "flow_median":
+                    _update_prev_velocities(
+                        prev_state_labels,
+                        prev_state_id_map,
+                        prev_flow,
+                        result,
+                        prev_state_frame_idx,
+                        cfg.fps,
+                    )
+                warped_prev_labels = _warp_labels(prev_state_labels, prev_flow)
+                stage = "flow+match"
+            else:
+                warped_prev_labels = prev_state_labels
+                stage = "match"
+            overlap = _overlap_counts(warped_prev_labels, confirmed_labels)
+            prev_areas = {pid: comp.area for pid, comp in prev_state_components.items()}
+            curr_areas = {cid: comp.area for cid, comp in confirmed_components.items()}
+            parents_to_children, children_to_parents = _build_links(
+                overlap=overlap,
+                prev_areas=prev_areas,
+                curr_areas=curr_areas,
+                cfg=cfg.match,
+            )
+            warped_prev_id_mask = _id_mask_from_labels(warped_prev_labels, prev_state_id_map)
+        else:
+            parents_to_children = {}
+            children_to_parents = {cid: [] for cid in confirmed_components}
+            warped_prev_id_mask = np.zeros_like(confirmed_labels, dtype=np.int32)
+
+        parent_obj_to_children: Dict[int, List[int]] = {}
+        child_to_parent_objs: Dict[int, List[int]] = {}
+        for parent_label in prev_state_components:
+            obj_id = prev_state_id_map.get(int(parent_label))
+            if obj_id is not None:
+                parent_obj_to_children[int(obj_id)] = []
+        for child_id, parent_labels in children_to_parents.items():
+            parent_obj_ids = sorted({
+                int(prev_state_id_map[parent_label])
+                for parent_label in parent_labels
+                if parent_label in prev_state_id_map
+            })
+            child_to_parent_objs[int(child_id)] = parent_obj_ids
+            for obj_id in parent_obj_ids:
+                parent_obj_to_children.setdefault(int(obj_id), []).append(int(child_id))
+
+        current_id_mask_crop = np.zeros_like(confirmed_labels, dtype=np.int32)
+        current_child_obj_ids: Dict[int, int] = {}
+        tracks_to_confirm: set[int] = set()
+
+        for child_id in sorted(confirmed_components):
+            parent_obj_ids = child_to_parent_objs.get(int(child_id), [])
+            is_one_to_one = (
+                len(parent_obj_ids) == 1
+                and len(parent_obj_to_children.get(int(parent_obj_ids[0]), [])) == 1
+            )
+            if is_one_to_one:
+                obj_id = int(parent_obj_ids[0])
+                runtime = tracks_runtime.get(obj_id)
+                if runtime is None:
+                    runtime = TrackRuntime(
+                        object_id=obj_id,
+                        confirmed=True,
+                        first_seen_frame_idx=confirm_frame_idx,
+                        emit_birth_event_on_confirm=False,
+                        birth_event_emitted=True,
+                    )
+                    tracks_runtime[obj_id] = runtime
+                runtime.miss_count = 0
+                runtime.first_missing_frame_idx = None
+                runtime.missing_frame_indices.clear()
+                if not runtime.confirmed:
+                    runtime.seen_streak += 1
+                    if int(confirm_frame_idx) not in runtime.pending_frame_indices:
+                        runtime.pending_frame_indices.append(int(confirm_frame_idx))
+                    if runtime.seen_streak >= birth_confirm:
+                        tracks_to_confirm.add(obj_id)
+                current_child_obj_ids[int(child_id)] = obj_id
+            elif len(parent_obj_ids) >= 2 or (
+                len(parent_obj_ids) == 1
+                and len(parent_obj_to_children.get(int(parent_obj_ids[0]), [])) >= 2
+            ):
+                obj_id = int(next_id)
+                next_id += 1
+                tracks_runtime[obj_id] = TrackRuntime(
+                    object_id=obj_id,
+                    confirmed=True,
+                    first_seen_frame_idx=int(confirm_frame_idx),
+                    seen_streak=birth_confirm,
+                    emit_birth_event_on_confirm=False,
+                    birth_event_emitted=True,
+                )
+                current_child_obj_ids[int(child_id)] = obj_id
+            else:
+                obj_id = int(next_id)
+                next_id += 1
+                confirmed_now = birth_confirm <= 1
+                tracks_runtime[obj_id] = TrackRuntime(
+                    object_id=obj_id,
+                    confirmed=bool(confirmed_now),
+                    first_seen_frame_idx=int(confirm_frame_idx),
+                    seen_streak=1,
+                    pending_frame_indices=[] if confirmed_now else [int(confirm_frame_idx)],
+                    emit_birth_event_on_confirm=True,
+                    birth_event_emitted=False,
+                )
+                if confirmed_now:
+                    tracks_to_confirm.add(obj_id)
+                current_child_obj_ids[int(child_id)] = obj_id
+
+            current_id_mask_crop[confirmed_labels == int(child_id)] = int(current_child_obj_ids[int(child_id)])
+
+        topology_parents_to_remove: set[int] = set()
+        for child_id in sorted(current_child_obj_ids):
+            parent_obj_ids = child_to_parent_objs.get(int(child_id), [])
+            if len(parent_obj_ids) < 2:
+                continue
+            for parent_id in parent_obj_ids:
+                runtime = tracks_runtime.get(int(parent_id))
+                if runtime is not None and not runtime.confirmed:
+                    _confirm_injection_track(runtime, result, events)
+                topology_parents_to_remove.add(int(parent_id))
+            events.append({
+                "type": "merge",
+                "prev_frame_idx": int(prev_state_frame_idx),
+                "frame_idx": int(confirm_frame_idx),
+                "parent_ids": [int(v) for v in parent_obj_ids],
+                "child_id": int(current_child_obj_ids[int(child_id)]),
+            })
+
+        for parent_obj_id, child_ids in parent_obj_to_children.items():
+            if len(child_ids) < 2:
+                continue
+            runtime = tracks_runtime.get(int(parent_obj_id))
+            if runtime is not None and not runtime.confirmed:
+                _confirm_injection_track(runtime, result, events)
+            topology_parents_to_remove.add(int(parent_obj_id))
+            events.append({
+                "type": "split",
+                "prev_frame_idx": int(prev_state_frame_idx),
+                "frame_idx": int(confirm_frame_idx),
+                "parent_id": int(parent_obj_id),
+                "child_ids": [int(current_child_obj_ids[int(child_id)]) for child_id in child_ids],
+            })
+
+        for parent_obj_id, child_ids in parent_obj_to_children.items():
+            if child_ids or int(parent_obj_id) in topology_parents_to_remove:
+                continue
+            runtime = tracks_runtime.get(int(parent_obj_id))
+            if runtime is None:
+                continue
+            if runtime.confirmed:
+                if runtime.miss_count == 0:
+                    runtime.first_missing_frame_idx = int(confirm_frame_idx)
+                runtime.miss_count += 1
+                if runtime.miss_count < death_confirm:
+                    persist_binary = (
+                        (warped_prev_id_mask == int(parent_obj_id))
+                        & (current_id_mask_crop == 0)
+                    )
+                    current_id_mask_crop[persist_binary] = int(parent_obj_id)
+                    if np.any(persist_binary):
+                        runtime.missing_frame_indices.append(int(confirm_frame_idx))
+                else:
+                    death_frame_idx = int(
+                        runtime.first_missing_frame_idx
+                        if runtime.first_missing_frame_idx is not None
+                        else confirm_frame_idx
+                    )
+                    last_seen_frame_idx = max(0, death_frame_idx - 1)
+                    prev_area = 0
+                    obj = result.objects.get(int(parent_obj_id))
+                    if obj is not None:
+                        frame_data = obj.frames.get(int(last_seen_frame_idx))
+                        if frame_data is not None:
+                            prev_area = int(frame_data.area)
+                    _discard_missing_grace_frames(
+                        result=result,
+                        frame_buffer=frame_buffer,
+                        runtime=runtime,
+                        masks_dir=masks_dir,
+                        area_timeseries=area_timeseries,
+                    )
+                    events.append({
+                        "type": "death",
+                        "prev_frame_idx": int(last_seen_frame_idx),
+                        "frame_idx": int(death_frame_idx),
+                        "object_id": int(parent_obj_id),
+                        "area_px": int(prev_area),
+                    })
+                    tracks_runtime.pop(int(parent_obj_id), None)
+            else:
+                _discard_tentative_track(result, frame_buffer, runtime)
+                tracks_runtime.pop(int(parent_obj_id), None)
+
+        for parent_obj_id in topology_parents_to_remove:
+            tracks_runtime.pop(int(parent_obj_id), None)
+
+        current_state_labels, current_state_components, current_state_id_map = _state_from_id_mask(
+            current_id_mask_crop
+        )
+        _update_result_from_id_mask(
+            result=result,
+            id_mask_crop=current_id_mask_crop,
+            frame_idx=int(confirm_frame_idx),
+            roi_offset=roi_offset,
+        )
+        for obj_id in sorted(tracks_to_confirm):
+            runtime = tracks_runtime.get(int(obj_id))
+            if runtime is not None:
+                _confirm_injection_track(runtime, result, events)
+        full_mask = _build_full_id_mask(
+            current_id_mask_crop,
+            frame_shape=frame_shape,
+            roi=roi,
+        )
+        frame_buffer.append(FrameBufferEntry(frame_idx=int(confirm_frame_idx), mask=full_mask))
+
+        if (
+            cfg.velocity_mode == "centroid_delta"
+            and prev_state_frame_idx is not None
+        ):
+            _update_prev_velocities_from_state_ids(
+                prev_components=prev_state_components,
+                prev_id_map=prev_state_id_map,
+                curr_components=current_state_components,
+                curr_id_map=current_state_id_map,
+                result=result,
+                frame_idx=int(prev_state_frame_idx),
+                fps=cfg.fps,
+            )
+
+        _flush_frame_buffer_entries(
+            frame_buffer=frame_buffer,
+            flush_before_frame_idx=int(confirm_frame_idx) - int(buffer_lag),
+            masks_dir=masks_dir,
+            area_timeseries=area_timeseries,
+        )
+
+        prev_state_labels = current_state_labels
+        prev_state_components = current_state_components
+        prev_state_frame_idx = int(confirm_frame_idx)
+        prev_state_id_map = current_state_id_map
+        return stage
 
     for frame_idx, frame_path in enumerate(frame_paths):
         frame_full = cv2.imread(frame_path)
@@ -1556,153 +2085,18 @@ def track_frames(
         confirmed_labels, confirmed_components = _confirm_persistent_components(
             prev_labels=prev_raw_labels,
             prev_components=prev_raw_components,
-            prev_confirmed_labels=prev_confirmed_labels,
+            prev_confirmed_labels=prev_state_labels,
             flow_prev_confirmed_to_prev=prev_flow,
             next_labels=raw_labels,
             flow_prev_to_next=flow_prev_raw_to_curr,
             cfg=cfg.persistence,
             min_area=cfg.segment.min_area,
         )
-
-        confirm_frame_idx = int(prev_raw_frame_idx)
-        total_area = int((confirmed_labels > 0).sum())
-        largest_component = max((c.area for c in confirmed_components.values()), default=0)
-        area_timeseries.append({
-            "frame_idx": confirm_frame_idx,
-            "total_area_px": total_area,
-            "num_components": int(len(confirmed_components)),
-            "largest_component_area_px": int(largest_component),
-        })
-
-        stage = "segment"
-        if prev_confirmed_labels is not None and prev_confirmed_frame_idx is not None:
-            if cfg.use_flow and prev_flow is not None:
-                if cfg.velocity_mode == "flow_median":
-                    _update_prev_velocities(
-                        prev_confirmed_labels,
-                        prev_id_map,
-                        prev_flow,
-                        result,
-                        prev_confirmed_frame_idx,
-                        cfg.fps,
-                    )
-                warped_prev = _warp_labels(prev_confirmed_labels, prev_flow)
-                stage = "flow+match"
-            else:
-                warped_prev = prev_confirmed_labels
-                stage = "match"
-            overlap = _overlap_counts(warped_prev, confirmed_labels)
-            prev_areas = {pid: comp.area for pid, comp in prev_confirmed_components.items()}
-            curr_areas = {cid: comp.area for cid, comp in confirmed_components.items()}
-            parents_to_children, children_to_parents = _build_links(
-                overlap=overlap,
-                prev_areas=prev_areas,
-                curr_areas=curr_areas,
-                cfg=cfg.match,
-            )
-        else:
-            parents_to_children = {}
-            children_to_parents = {cid: [] for cid in confirmed_components}
-            curr_areas = {cid: comp.area for cid, comp in confirmed_components.items()}
-            prev_areas = {}
-
-        curr_id_map: Dict[int, int] = {}
-        for child_id, parent_ids in children_to_parents.items():
-            if len(parent_ids) == 1:
-                parent_id = parent_ids[0]
-                if len(parents_to_children.get(parent_id, [])) == 1:
-                    curr_id_map[child_id] = prev_id_map[parent_id]
-                    continue
-            curr_id_map[child_id] = next_id
-            next_id += 1
-
-        if (
-            cfg.velocity_mode == "centroid_delta"
-            and prev_confirmed_labels is not None
-            and prev_confirmed_frame_idx is not None
-        ):
-            _update_prev_velocities_from_centroids(
-                prev_components=prev_confirmed_components,
-                curr_components=confirmed_components,
-                parents_to_children=parents_to_children,
-                children_to_parents=children_to_parents,
-                prev_id_map=prev_id_map,
-                curr_id_map=curr_id_map,
-                result=result,
-                frame_idx=prev_confirmed_frame_idx,
-                fps=cfg.fps,
-            )
-
-        if prev_confirmed_labels is not None and prev_confirmed_frame_idx is not None:
-            for child_id, parent_ids in children_to_parents.items():
-                if not parent_ids:
-                    events.append({
-                        "type": "birth",
-                        "prev_frame_idx": int(prev_confirmed_frame_idx),
-                        "frame_idx": confirm_frame_idx,
-                        "object_id": int(curr_id_map[child_id]),
-                        "area_px": int(curr_areas.get(child_id, 0)),
-                    })
-                elif len(parent_ids) >= 2:
-                    events.append({
-                        "type": "merge",
-                        "prev_frame_idx": int(prev_confirmed_frame_idx),
-                        "frame_idx": confirm_frame_idx,
-                        "parent_ids": [int(prev_id_map[p]) for p in parent_ids],
-                        "child_id": int(curr_id_map[child_id]),
-                    })
-
-            for parent_id, child_ids in parents_to_children.items():
-                if not child_ids:
-                    events.append({
-                        "type": "death",
-                        "prev_frame_idx": int(prev_confirmed_frame_idx),
-                        "frame_idx": confirm_frame_idx,
-                        "object_id": int(prev_id_map[parent_id]),
-                        "area_px": int(prev_areas.get(parent_id, 0)),
-                    })
-                elif len(child_ids) >= 2:
-                    events.append({
-                        "type": "split",
-                        "prev_frame_idx": int(prev_confirmed_frame_idx),
-                        "frame_idx": confirm_frame_idx,
-                        "parent_id": int(prev_id_map[parent_id]),
-                        "child_ids": [int(curr_id_map[c]) for c in child_ids],
-                    })
-
-        id_mask_crop = np.zeros_like(confirmed_labels, dtype=np.int32)
-        for label_id, comp in confirmed_components.items():
-            obj_id = curr_id_map.get(label_id)
-            if obj_id is None:
-                continue
-            id_mask_crop[confirmed_labels == label_id] = obj_id
-
-            x_offset, y_offset = roi_offset
-            centroid = (comp.centroid[0] + x_offset, comp.centroid[1] + y_offset)
-            bbox = BoundingBox(
-                x_min=comp.bbox.x_min + x_offset,
-                y_min=comp.bbox.y_min + y_offset,
-                x_max=comp.bbox.x_max + x_offset,
-                y_max=comp.bbox.y_max + y_offset,
-            )
-            frame_data = FrameData(centroid=centroid, area=comp.area, bbox=bbox)
-            if obj_id not in result.objects:
-                result.objects[obj_id] = TrackedObject(object_id=obj_id)
-            result.objects[obj_id].frames[confirm_frame_idx] = frame_data
-
-        if roi:
-            full_mask = np.zeros(frame_shape, dtype=np.int32)
-            x1, y1 = roi["x1"], roi["y1"]
-            x2, y2 = roi["x2"], roi["y2"]
-            full_mask[y1:y2, x1:x2] = id_mask_crop
-        else:
-            full_mask = id_mask_crop
-        save_mask(full_mask, str(masks_dir / f"{confirm_frame_idx:06d}.png"))
-
-        prev_confirmed_labels = confirmed_labels
-        prev_confirmed_components = confirmed_components
-        prev_confirmed_frame_idx = confirm_frame_idx
-        prev_id_map = curr_id_map
+        stage = _process_confirmed_frame(
+            confirm_frame_idx=int(prev_raw_frame_idx),
+            confirmed_labels=confirmed_labels,
+            confirmed_components=confirmed_components,
+        )
         prev_flow = flow_prev_raw_to_curr
 
         prev_raw_gray = gray
@@ -1710,186 +2104,48 @@ def track_frames(
         prev_raw_components = raw_components
         prev_raw_frame_idx = frame_idx
 
-        _log_progress(confirm_frame_idx, total_frames, stage, cfg.log_every)
+        _log_progress(int(prev_state_frame_idx), total_frames, stage, cfg.log_every)
 
     if prev_raw_labels is not None and prev_raw_frame_idx is not None:
         confirmed_labels, confirmed_components = _confirm_persistent_components(
             prev_labels=prev_raw_labels,
             prev_components=prev_raw_components,
-            prev_confirmed_labels=prev_confirmed_labels,
+            prev_confirmed_labels=prev_state_labels,
             flow_prev_confirmed_to_prev=prev_flow,
             next_labels=None,
             flow_prev_to_next=None,
             cfg=cfg.persistence,
             min_area=cfg.segment.min_area,
         )
-
-        confirm_frame_idx = int(prev_raw_frame_idx)
-        total_area = int((confirmed_labels > 0).sum())
-        largest_component = max((c.area for c in confirmed_components.values()), default=0)
-        area_timeseries.append({
-            "frame_idx": confirm_frame_idx,
-            "total_area_px": total_area,
-            "num_components": int(len(confirmed_components)),
-            "largest_component_area_px": int(largest_component),
-        })
-
-        stage = "segment"
-        if prev_confirmed_labels is not None and prev_confirmed_frame_idx is not None:
-            if cfg.use_flow and prev_flow is not None:
-                if cfg.velocity_mode == "flow_median":
-                    _update_prev_velocities(
-                        prev_confirmed_labels,
-                        prev_id_map,
-                        prev_flow,
-                        result,
-                        prev_confirmed_frame_idx,
-                        cfg.fps,
-                    )
-                warped_prev = _warp_labels(prev_confirmed_labels, prev_flow)
-                stage = "flow+match"
-            else:
-                warped_prev = prev_confirmed_labels
-                stage = "match"
-            overlap = _overlap_counts(warped_prev, confirmed_labels)
-            prev_areas = {pid: comp.area for pid, comp in prev_confirmed_components.items()}
-            curr_areas = {cid: comp.area for cid, comp in confirmed_components.items()}
-            parents_to_children, children_to_parents = _build_links(
-                overlap=overlap,
-                prev_areas=prev_areas,
-                curr_areas=curr_areas,
-                cfg=cfg.match,
-            )
-        else:
-            parents_to_children = {}
-            children_to_parents = {cid: [] for cid in confirmed_components}
-            curr_areas = {cid: comp.area for cid, comp in confirmed_components.items()}
-            prev_areas = {}
-
-        curr_id_map: Dict[int, int] = {}
-        for child_id, parent_ids in children_to_parents.items():
-            if len(parent_ids) == 1:
-                parent_id = parent_ids[0]
-                if len(parents_to_children.get(parent_id, [])) == 1:
-                    curr_id_map[child_id] = prev_id_map[parent_id]
-                    continue
-            curr_id_map[child_id] = next_id
-            next_id += 1
-
-        if (
-            cfg.velocity_mode == "centroid_delta"
-            and prev_confirmed_labels is not None
-            and prev_confirmed_frame_idx is not None
-        ):
-            _update_prev_velocities_from_centroids(
-                prev_components=prev_confirmed_components,
-                curr_components=confirmed_components,
-                parents_to_children=parents_to_children,
-                children_to_parents=children_to_parents,
-                prev_id_map=prev_id_map,
-                curr_id_map=curr_id_map,
-                result=result,
-                frame_idx=prev_confirmed_frame_idx,
-                fps=cfg.fps,
-            )
-
-        if prev_confirmed_labels is not None and prev_confirmed_frame_idx is not None:
-            for child_id, parent_ids in children_to_parents.items():
-                if not parent_ids:
-                    events.append({
-                        "type": "birth",
-                        "prev_frame_idx": int(prev_confirmed_frame_idx),
-                        "frame_idx": confirm_frame_idx,
-                        "object_id": int(curr_id_map[child_id]),
-                        "area_px": int(curr_areas.get(child_id, 0)),
-                    })
-                elif len(parent_ids) >= 2:
-                    events.append({
-                        "type": "merge",
-                        "prev_frame_idx": int(prev_confirmed_frame_idx),
-                        "frame_idx": confirm_frame_idx,
-                        "parent_ids": [int(prev_id_map[p]) for p in parent_ids],
-                        "child_id": int(curr_id_map[child_id]),
-                    })
-
-            for parent_id, child_ids in parents_to_children.items():
-                if not child_ids:
-                    events.append({
-                        "type": "death",
-                        "prev_frame_idx": int(prev_confirmed_frame_idx),
-                        "frame_idx": confirm_frame_idx,
-                        "object_id": int(prev_id_map[parent_id]),
-                        "area_px": int(prev_areas.get(parent_id, 0)),
-                    })
-                elif len(child_ids) >= 2:
-                    events.append({
-                        "type": "split",
-                        "prev_frame_idx": int(prev_confirmed_frame_idx),
-                        "frame_idx": confirm_frame_idx,
-                        "parent_id": int(prev_id_map[parent_id]),
-                        "child_ids": [int(curr_id_map[c]) for c in child_ids],
-                    })
-
-        id_mask_crop = np.zeros_like(confirmed_labels, dtype=np.int32)
-        for label_id, comp in confirmed_components.items():
-            obj_id = curr_id_map.get(label_id)
-            if obj_id is None:
-                continue
-            id_mask_crop[confirmed_labels == label_id] = obj_id
-
-            x_offset, y_offset = roi_offset
-            centroid = (comp.centroid[0] + x_offset, comp.centroid[1] + y_offset)
-            bbox = BoundingBox(
-                x_min=comp.bbox.x_min + x_offset,
-                y_min=comp.bbox.y_min + y_offset,
-                x_max=comp.bbox.x_max + x_offset,
-                y_max=comp.bbox.y_max + y_offset,
-            )
-            frame_data = FrameData(centroid=centroid, area=comp.area, bbox=bbox)
-            if obj_id not in result.objects:
-                result.objects[obj_id] = TrackedObject(object_id=obj_id)
-            result.objects[obj_id].frames[confirm_frame_idx] = frame_data
-
-        if roi:
-            full_mask = np.zeros(frame_shape, dtype=np.int32)
-            x1, y1 = roi["x1"], roi["y1"]
-            x2, y2 = roi["x2"], roi["y2"]
-            full_mask[y1:y2, x1:x2] = id_mask_crop
-        else:
-            full_mask = id_mask_crop
-        save_mask(full_mask, str(masks_dir / f"{confirm_frame_idx:06d}.png"))
-
-        _log_progress(confirm_frame_idx, total_frames, stage, cfg.log_every)
-
-    if cfg.debounce.birth_confirm_frames > 1 or cfg.debounce.death_confirm_frames > 1:
-        id_alias_map = _build_gap_relink_aliases(result, cfg.debounce)
-        debounce_alias_count = int(len(id_alias_map))
-        debounced_area_timeseries, debounced_bd_events = _debounce_saved_masks(
-            masks_dir=masks_dir,
-            total_frames=total_frames,
-            cfg=cfg.debounce,
-            log_every=cfg.log_every,
-            id_alias_map=id_alias_map,
+        stage = _process_confirmed_frame(
+            confirm_frame_idx=int(prev_raw_frame_idx),
+            confirmed_labels=confirmed_labels,
+            confirmed_components=confirmed_components,
         )
-        if debounced_area_timeseries:
-            area_timeseries = debounced_area_timeseries
-        if debounced_bd_events:
-            passthrough_events = [
-                _remap_event_ids(e, id_alias_map)
-                for e in events
-                if e.get("type") not in {"birth", "death"}
-            ]
-            events = sorted(
-                passthrough_events + debounced_bd_events,
-                key=lambda e: (int(e.get("frame_idx", -1)), str(e.get("type", ""))),
-            )
-        _rebuild_result_from_saved_masks(
-            result=result,
-            masks_dir=masks_dir,
-            total_frames=total_frames,
-            roi_offset=roi_offset,
-            fps=cfg.fps,
-        )
+        _log_progress(int(prev_state_frame_idx), total_frames, stage, cfg.log_every)
+
+    for obj_id, runtime in list(tracks_runtime.items()):
+        if runtime.confirmed:
+            continue
+        _discard_tentative_track(result, frame_buffer, runtime)
+        tracks_runtime.pop(int(obj_id), None)
+
+    _flush_frame_buffer_entries(
+        frame_buffer=frame_buffer,
+        flush_before_frame_idx=total_frames,
+        masks_dir=masks_dir,
+        area_timeseries=area_timeseries,
+        force=True,
+    )
+
+    events = sorted(
+        events,
+        key=lambda e: (int(e.get("frame_idx", -1)), str(e.get("type", ""))),
+    )
+    area_timeseries = sorted(
+        area_timeseries,
+        key=lambda record: int(record.get("frame_idx", -1)),
+    )
 
     _annotate_track_lifecycle(result, events)
     result.num_objects = len(result.objects)

@@ -70,6 +70,161 @@
   - split children: `split` birth, `merge` death
   - merged child: `merge` birth, `death` death
 
+## Stateful Debounce Rewrite (2026-03-24)
+- `track_frames()` now applies debounce inside the tracking loop instead of rebuilding IDs from saved masks after the fact
+- New runtime model:
+  - tentative births are buffered until they survive `birth_confirm_frames`
+  - confirmed tracks enter a grace-period `missing` state for up to `death_confirm_frames - 1` absent frames
+  - short dropouts keep the same ID and a persisted mask instead of emitting death/rebirth noise
+- Split and merge transitions remain immediate topology events:
+  - split parents die immediately with `death_reason=split`
+  - merge parents die immediately with `death_reason=merge`
+  - split/merge children get new IDs immediately with matching `birth_reason`
+- Birth confirmation is backdated to the first frame of the stable run, so accepted tracks still begin where the bubble first appeared
+- Terminal death now requires the full miss threshold; a track that vanishes near the sequence end is not marked dead unless enough missing frames were observed
+- Output masks are buffered by the birth-confirmation lag so 1-frame tentative flickers can be removed before any artifact is written
+- Synthetic validation covered:
+  - 1-frame flicker suppression before confirmation
+  - continuous IDs through a 2-frame internal gap
+  - no terminal death when the missing run is shorter than the threshold
+  - death only on the frame where the miss threshold is actually exceeded
+  - preserved split/merge lineage metadata under the new loop
+- Follow-up death semantics patch:
+  - `death_frame_idx` is now backdated to the first missing frame once the miss threshold is exceeded
+  - a truly dead track no longer keeps carried-forward masks in `tracks.json`, saved mask PNGs, or area summaries for the intermediate missing frames once death is confirmed
+  - if a bubble reappears within the grace window, those intermediate frames remain part of the same track with the same ID and carried-forward mask
+- The old post-hoc relink path is no longer used by `track_frames()`, so `debounce_relink_*` knobs are currently legacy settings rather than active behavior
+
+## Vanished Area Moving-Window Plot (2026-03-25)
+- Added `scripts/plot_vanished_area_moving_window.py` for standalone visualization of vanished bubble area
+- Data source:
+  - uses only `events.json` entries with `type == "death"` and positive `area_px`
+  - ignores split/merge/birth events, so only truly vanished bubbles are counted
+- Timeline sampling:
+  - computes values at integer-second centers (`t = 0, 1, 2, ...`)
+  - each sample sums death areas within a centered time window around `t`
+- Implemented windows:
+  - 2s window (`+-1s`)
+  - 5s window (`+-2.5s`)
+- Outputs (four PNGs + one CSV):
+  - `vanished_area_window_2s_x_seconds.png`
+  - `vanished_area_window_2s_x_frames.png`
+  - `vanished_area_window_5s_x_seconds.png`
+  - `vanished_area_window_5s_x_frames.png`
+  - `vanished_area_moving_window.csv`
+
+## Publish Velocity/Lineage Export Updates (2026-03-25)
+- `scripts/export_bubble_max_velocity_summary.py` now defaults to publish runs:
+  - `outputs/case1_air1_publish`
+  - `outputs/case2_air1_publish`
+  - `outputs/case3_air1_publish`
+- Summary CSV now includes lineage metadata from `tracks.json`:
+  - `birth_reason`, `birth_frame_idx`, `birth_parent_ids`
+  - `death_reason`, `death_frame_idx`, `death_child_ids`
+- `scripts/plot_velocity_area_logxy_with_marginal_pdfs.py` still requires `bubble_velocity_area_metrics.csv`
+- Publish runs did not initially contain metrics CSV, so generate it first with `scripts/plot_velocity_norm_summary.py`
+
+## Vanished-Area Log-Y Plot Outputs (2026-03-27)
+- Updated `scripts/plot_vanished_area_moving_window.py` to generate additional log-scale y-axis plots without removing existing linear plots
+- New per-window outputs:
+  - `vanished_area_window_2s_x_seconds_logy.png`
+  - `vanished_area_window_2s_x_frames_logy.png`
+  - `vanished_area_window_5s_x_seconds_logy.png`
+  - `vanished_area_window_5s_x_frames_logy.png`
+- Log-y handling masks non-positive values as gaps (`NaN`) so zero-area periods do not produce invalid log values
+- Regenerated plot sets for:
+  - `outputs/case1_air1_publish`
+  - `outputs/case2_air1_publish`
+  - `outputs/case3_air1_publish`
+
+## Framewise Injection/Vanish CSV Export (2026-03-27)
+- Added `scripts/export_injection_vanished_area_timeseries.py`
+- Generates one CSV per run with columns:
+  - `frame_idx`
+  - `time_s`
+  - `total_injection_birth_area_px2`
+  - `total_injection_birth_area_mm2`
+  - `total_vanished_death_area_px2`
+  - `total_vanished_death_area_mm2`
+- Aggregation logic:
+  - injection-birth area uses `events.json` entries with `type == "birth"` (in this pipeline these are injection births)
+  - vanished-death area uses `events.json` entries with `type == "death"` (true disappearances)
+  - frame index uses event `frame_idx`; per-frame totals are sums over all matching events
+  - mm^2 conversion uses case-specific `mm_per_pixel` from each run's config (`events.json`)
+- Generated files:
+  - `outputs/case1_air1_publish/injection_vanished_area_timeseries.csv`
+  - `outputs/case2_air1_publish/injection_vanished_area_timeseries.csv`
+  - `outputs/case3_air1_publish/injection_vanished_area_timeseries.csv`
+
+## Pixel/MM Conversion Key (2026-04-06)
+- Source-of-truth file: `pixel_mm_conversion_standard.md`
+- Standard to use for downscaled 0.5 processing data:
+  - case1: `200 mm = 2335 px` -> `mm_per_px = 0.085653104925`
+  - case2: `200 mm = 2300 px` -> `mm_per_px = 0.086956521739`
+  - case3: `200 mm = 2420 px` -> `mm_per_px = 0.082644628099`
+- Derived area conversion (`mm2_per_px2 = mm_per_px^2`):
+  - case1: `0.007336454383`
+  - case2: `0.007561436673`
+  - case3: `0.006830134554`
+- Derived `3.14 mm^2` thresholds in px^2 for split/merge escape checks:
+  - case1: `427.999663 px^2`
+  - case2: `415.265000 px^2`
+  - case3: `459.727400 px^2`
+- Note: for journal-1 subcount exports, conversion uses this standard file (not run-config `mm_per_pixel`).
+
+## Three Escaping Subcount CSV Export (2026-04-06)
+- Added `scripts/export_three_escaping_subcount_timeseries.py`
+- Read and implemented requirements from:
+  - `journal1_three_escaping_cases_subcount_outputCSV_requirements.md`
+  - `pixel_mm_conversion_standard.md`
+- Outputs generated:
+  - `outputs/case1_air1_time_series_subcount_three_escaping_situation.csv`
+  - `outputs/case2_air1_time_series_subcount_three_escaping_situation.csv`
+  - `outputs/case3_air1_time_series_subcount_three_escaping_situation.csv`
+- Implemented all 16 required columns:
+  - per-frame existing area + IDs
+  - vanished/death area + IDs
+  - split escape area + parent(child-list) strings
+  - merge escape area + (parent-list)child strings
+  - per-frame totals across the three escape categories
+- Split escape rule implemented:
+  - `parent_prev_area - sum(children_curr_area)` if >= `max(20% * parent_prev_area, 3.14 mm^2 in px^2)`
+- Merge escape rule implemented:
+  - `sum(parents_prev_area) - child_curr_area` if >= `max(20% * sum(parents_prev_area), 3.14 mm^2 in px^2)`
+
+## Three Escaping Subcount Threshold Variant (2026-04-10)
+- Extended `scripts/export_three_escaping_subcount_timeseries.py` with CLI-configurable thresholds:
+  - `--ratio-threshold` (default `0.2`)
+  - `--mm2-threshold` (default `3.14`)
+  - `--output-template` for non-overwriting variant filenames
+- Generated additional variant outputs while preserving originals:
+  - `outputs/case1_air1_time_series_subcount_three_escaping_situation_threshold_50%_and_5mm2.csv`
+  - `outputs/case2_air1_time_series_subcount_three_escaping_situation_threshold_50%_and_5mm2.csv`
+  - `outputs/case3_air1_time_series_subcount_three_escaping_situation_threshold_50%_and_5mm2.csv`
+- Variant settings used:
+  - split/merge ratio threshold = `0.5` (50%)
+  - split/merge absolute threshold = `5.0 mm^2`
+- Unit conversion remains tied to the downscaled-0.5 standard key:
+  - case1 `200/2335 mm/px`
+  - case2 `200/2300 mm/px`
+  - case3 `200/2420 mm/px`
+
+## Case2 Air1 Multi-Threshold Subcount Variants (2026-04-13)
+- Generated three additional case2-only files with absolute threshold fixed at `5.0 mm^2` and ratio thresholds:
+  - `40%`
+  - `60%`
+  - `80%`
+- Output files:
+  - `outputs/case2_air1_time_series_subcount_three_escaping_situation_threshold_40%_and_5mm2.csv`
+  - `outputs/case2_air1_time_series_subcount_three_escaping_situation_threshold_60%_and_5mm2.csv`
+  - `outputs/case2_air1_time_series_subcount_three_escaping_situation_threshold_80%_and_5mm2.csv`
+- Execution method to avoid extra artifacts in `outputs`:
+  - export runs were written to `/tmp/case2_threshold_exports`
+  - only the three `case2_*` files were copied into `outputs/`
+- Validation:
+  - all three files have the expected 16-column header
+  - row count is consistent across variants (`1313` lines including header)
+
 ## Publishing Prep Findings (2026-03-24)
 - Existing Air1 case roots on disk:
   - case1 current source root is the generic `data/bubbles` tree (`frames/`, `frames_0p5/`, `map.csv`)
@@ -387,6 +542,250 @@
   - `A_bubble_avg` = mean `area_px` over all appearances of the bubble.
   - `A_bubble_max` = max `area_px` over all appearances.
   - `max_velocity_x` / `max_velocity_y` use the maximum absolute component speed across frames, converted from `tracks.csv` pixel-per-second columns to pixel/frame with `fps`.
-  - `max_velocity` uses the real per-frame magnitude maximum from `velocity_mag_px_s`, then converts to pixel/frame.
-  - `time_of_appearance in s` = `frame_amount_of_appearance / fps`.
+- `max_velocity` uses the real per-frame magnitude maximum from `velocity_mag_px_s`, then converts to pixel/frame.
+- `time_of_appearance in s` = `frame_amount_of_appearance / fps`.
 - Note: the user prompt said "14 columns" but listed 15 headings, so the exporter writes all 15 listed fields.
+
+## Case2 Air1 Additional Threshold Variants (2026-04-13)
+- Generated two new case2-only files with absolute threshold fixed at `5.0 mm^2` and ratio thresholds:
+  - `65%`
+  - `70%`
+- Output files:
+  - `outputs/case2_air1_time_series_subcount_three_escaping_situation_threshold_65%_and_5mm2.csv`
+  - `outputs/case2_air1_time_series_subcount_three_escaping_situation_threshold_70%_and_5mm2.csv`
+- Execution method:
+  - exporter runs written to `/tmp/case2_threshold_exports_65_70`
+  - only `case2_*` files copied into `outputs/`
+- Validation:
+  - both files use the same 16-column schema as the prior threshold variants
+  - both files have `1313` lines including header
+
+## Case1 Publish Label Relayout Frames (2026-04-18)
+- Target output directory exists and is empty:
+  - `outputs/case1_air1_publish_bubble_numbering_size_enlarge_frames_with_original_frame_numbering_301_to_311`
+- Source dataset and mapping:
+  - `data/bubbles/case1_air1_publish/frame_map.csv`
+  - `data/bubbles/case1_air1_publish/publishing_relabel_config.json`
+- Mapping rule confirmed by metadata:
+  - first original frame is `71`, so requested original `301..311` correspond to relabeled frame numbers `231..241` and zero-based frame indices `230..240`.
+- Case1 publish run uses relabeled half-scale frames:
+  - `outputs/case1_air1_publish/sam2_prompted_flow_config.json` -> `frames_dir = .../case1_air1_publish/frames_0p5`.
+- Original label style source:
+  - `src/bubble_tracking/visualization.py::draw_tracking_info`
+  - baseline style is `font_scale=0.9`, `font_thickness=2`, colored text with black background rectangle, label near centroid.
+- Requested transformation implemented in custom export logic:
+  - label anchor moved to outside/below-right of bbox (`x_max + offset`, `y_max + offset + text_h`)
+  - text color set to black `(0,0,0)`
+  - background rectangle removed (transparent background)
+  - label size multiplier `60/36`, giving `font_scale=1.5`, `font_thickness=3` from baseline.
+- Output artifacts produced:
+  - `outputs/case1_air1_publish_bubble_numbering_size_enlarge_frames_with_original_frame_numbering_301_to_311/case1_air1_publish_original_0301_relabeled_0231_label_outside_black_text_scale_60_over_36.jpg`
+  - ...
+  - `outputs/case1_air1_publish_bubble_numbering_size_enlarge_frames_with_original_frame_numbering_301_to_311/case1_air1_publish_original_0311_relabeled_0241_label_outside_black_text_scale_60_over_36.jpg`
+  - Verified count: exactly `11` files.
+
+## Case1 Publish Label Position Correction (2026-04-18, follow-up)
+- User clarified desired position:
+  - not below-right of bbox corner,
+  - but directly below the right-bottom corner.
+- Implemented correction by changing horizontal anchor from:
+  - previous: `tx = bbox.x_max + offset`
+  - corrected: `tx = bbox.x_max`
+- Vertical anchor remains below bbox with a small gap:
+  - `ty = bbox.y_max + 4 + text_height`
+- Style remains unchanged from previous accepted version:
+  - black text
+  - transparent background (no label box)
+  - scale factor `60/36` (`font_scale=1.5`, `font_thickness=3`)
+- Re-rendered in-place for original frames `301..311` in the same output directory.
+- Verification:
+  - `11` files present
+  - `clamped_labels=0` during render pass.
+
+## Case1 Publish Manual Coordinate Handoff (2026-04-18)
+- Generated handoff CSV:
+  - `outputs/case1_air1_publish_bubble_numbering_size_enlarge_frames_with_original_frame_numbering_301_to_311/label_relative_coordinates_original_301_to_311.csv`
+- Rows exported: `54` (all visible tracked bubbles across original frames `301..311`).
+- CSV includes:
+  - corner coordinates (`corner_x_max`, `corner_y_max`)
+  - text metrics (`text_w`, `text_h`, `baseline`)
+  - relative offsets (`dx`, `dy`) for:
+    - previous below-right placement
+    - latest direct-below placement
+    - two manual “want” options (right-edge-aligned and centered-under-corner)
+  - absolute `cv2.putText` anchors for each option.
+
+## Bubble Numbering Font Update (2026-04-19)
+- Requested font: Times New Roman.
+- Environment check: no Times New Roman `.ttf/.otf/.ttc` file found in standard system/user font locations.
+- Installed Times-compatible options found: `Nimbus Roman`, `Liberation Serif`.
+- Applied renderer update for the 11 target frames:
+  - switched label text drawing from OpenCV Hershey to PIL TrueType.
+  - used font file: `/usr/share/fonts/opentype/urw-base35/NimbusRoman-Regular.otf`.
+- Placement/style retained from latest accepted run:
+  - `x_offset = -90`
+  - black text, transparent background.
+- Verification output: regenerated 11 frames; `clamped_labels=0`.
+
+## Manual Mask Edit Workflow for case1 frame 0304/0234 (2026-04-19)
+- Source frame mapping confirmed:
+  - original `0304` -> relabeled frame `0234` -> mask index `000233`.
+- Source mask copied to manual folder:
+  - from `outputs/case1_air1_publish/masks/000233.png`
+  - to `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/000233_manual_mask.png`.
+- Added script:
+  - `scripts/render_case1_0234_from_manual_mask.py`.
+- Script behavior:
+  - reads edited ID mask (`uint16`) from manual folder,
+  - recomputes centroid and bbox from pixels per ID,
+  - preserves numbering using mask IDs directly,
+  - writes output image:
+    `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/case1_air1_publish_original_0304_relabeled_0234_label_outside_black_text_scale_60_over_36.jpg`.
+- Baseline validation run (before manual edits) succeeded:
+  - `IDs rendered: 3`
+  - `clamped_labels=0`.
+
+## Implemented Matrix Round-Trip for frame 0304/0234 (2026-04-19)
+- New script added:
+  - `scripts/matrix_roundtrip_case1_0234.py`
+- `export` subcommand outputs in manual folder:
+  - `000233_manual_mask_id48_matrix.csv`
+  - `000233_manual_mask_id49_matrix.csv`
+  - `000233_manual_mask_matrix_meta.json`
+- CSV format:
+  - raw full-frame grid only
+  - no header
+  - strict binary values `{0,1}`
+  - expected shape exactly `1836 x 2748`
+- `import` subcommand behavior:
+  - reads edited `id48/id49` matrices
+  - rejects malformed CSVs (shape mismatch, empty/NaN/non-int/non-binary)
+  - rejects painting on protected non-48/49 object pixels with explicit counts
+  - keeps all non-48/49 IDs unchanged
+  - overlap policy: `#49` wins
+  - writes rebuilt ID mask PNG (`uint16`)
+- Validation results:
+  - export matrices verified at `1836 x 2748`
+  - synthetic edit import succeeded
+  - ID set preserved: `[0, 16, 48, 49]`
+  - #49 geometry moved downward as expected:
+    - `y_max: 1743 -> 1772`
+    - `centroid_y: 1649.872... -> 1650.344...`
+  - renderer run from edited mask succeeded; output image generated.
+
+## Compact Editable Matrix Update for 0304/0234 (2026-04-19)
+- User constraint:
+  - local CSV viewer cannot handle files with more than `1000` columns.
+  - full-frame `1836 x 2748` matrices are not practically editable.
+- Updated workflow requirements:
+  - auto-fill enclosed background voids for `#48` first,
+  - export a smaller cropped `#49` matrix with `10%` expansion in each direction,
+  - record crop row/column offsets for later merge back to full frame,
+  - regenerate frame with previous accepted rendering style.
+- Implementation direction:
+  - keep existing full-frame round-trip commands unchanged,
+  - add compact-prep utilities that output:
+    - a filled mask (`#48` holes filled),
+    - cropped `#49` CSV matrix,
+    - crop metadata JSON with full-frame origin and bounds.
+- Implemented in `scripts/matrix_roundtrip_case1_0234.py`:
+  - new subcommand: `prepare-compact`
+  - actions:
+    - fills enclosed background holes for `#48` (background-only fill),
+    - writes updated mask,
+    - exports `#49` cropped binary CSV using `10%` margin each side,
+    - writes crop metadata JSON with row/column origin and bounds.
+- Run results:
+  - `id48_hole_fill_pixels_added = 1677`
+  - ID counts:
+    - `#16: 3087 -> 3087` (unchanged)
+    - `#48: 144270 -> 145947`
+    - `#49: 19858 -> 19858` (unchanged)
+  - background: `4878113 -> 4876436`
+- Compact crop exported for `#49`:
+  - CSV path:
+    `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/000233_manual_mask_id49_crop_10pct_before_manual_change.csv`
+  - shape: `268 x 174` (under 1000 columns)
+  - full-frame crop bounds (exclusive end):
+    - `row_start = 1499`
+    - `row_end_exclusive = 1767`
+    - `col_start = 1296`
+    - `col_end_exclusive = 1470`
+- Regenerated frame (existing style):
+  - output:
+    `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/case1_air1_publish_original_0304_relabeled_0234_label_outside_black_text_scale_60_over_36.jpg`
+  - verification:
+    - `IDs rendered: 3`
+    - `clamped_labels=0`
+
+## Applied Edited #49 Crop v3 and Regenerated Frame (2026-04-19)
+- Input edited crop used:
+  - `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/000233_manual_mask_id49_crop_10pct_after_manual_change_v3.csv`
+- Merge details:
+  - crop bounds from metadata:
+    - `row_start=1499`, `row_end_exclusive=1767`
+    - `col_start=1296`, `col_end_exclusive=1470`
+  - merged into base:
+    `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/000233_manual_mask_id48_void_filled.png`
+  - protected-ID check enforced (paint allowed only on IDs `0/48/49`).
+- Output merged mask:
+  - `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/000233_manual_mask_id48_void_filled_id49_from_crop_v3.png`
+- Merge validation:
+  - IDs present: `[0, 16, 48, 49]`
+  - `#49` pixel count after v3 merge: `21932`
+  - crop matrix shape used: `268 x 174`
+- Regenerated frame output:
+  - `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/case1_air1_publish_original_0304_relabeled_0234_label_outside_black_text_scale_60_over_36.jpg`
+  - render validation:
+    - `IDs rendered: 3`
+    - `clamped_labels=0`
+
+## Applied Edited #49 Crop v4 and Regenerated Frame (2026-04-19)
+- Input edited crop used:
+  - `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/000233_manual_mask_id49_crop_10pct_after_manual_change_v4.csv`
+- Merge details:
+  - crop bounds from metadata:
+    - `row_start=1499`, `row_end_exclusive=1767`
+    - `col_start=1296`, `col_end_exclusive=1470`
+  - merged into base:
+    `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/000233_manual_mask_id48_void_filled.png`
+  - protected-ID check enforced (paint allowed only on IDs `0/48/49`).
+- Output merged mask:
+  - `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/000233_manual_mask_id48_void_filled_id49_from_crop_v4.png`
+- Merge validation:
+  - IDs present: `[0, 16, 48, 49]`
+  - `#49` pixel count after v4 merge: `21993`
+  - crop matrix shape used: `268 x 174`
+- Regenerated frame output:
+  - `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/case1_air1_publish_original_0304_relabeled_0234_label_outside_black_text_scale_60_over_36.jpg`
+  - render validation:
+    - `IDs rendered: 3`
+    - `clamped_labels=0`
+
+## Case2 Air1 Self-Reprompt Experiment Setup (2026-04-19)
+- Baseline CV-keyframe run exists at: `outputs/case2_air1_publish`.
+- Baseline config confirms:
+  - `prompt_mode = sam2_cv_keyframe_prompts`
+  - `cv_keyframe_interval = 160`
+  - `cv_keyframe_start_idx = 2`
+  - `num_prompts = 9`
+- First CV keyframe prompt record:
+  - `base_idx = 2`, `prompt_idx = 2`, `area = 35365`
+  - debug mask path: `outputs/case2_air1_publish_debug/base_000002_prompt_000002_mask.png`
+- Working assumption for self-reprompt test:
+  - Seed frame at index 2 using the same initial binary mask as baseline.
+  - For each next chunk boundary, use SAM2-predicted mask from that boundary frame as the next mask prompt.
+
+## Case2 Air1 Self-Reprompt Implementation (2026-04-19)
+- Added new script: `scripts/run_sam2_self_prompted_flow.py`.
+- Behavior implemented:
+  - seeds SAM2 once with `--seed-mask` at `--seed-frame-idx`,
+  - propagates in chunks of `--chunk-interval`,
+  - uses SAM2-predicted boundary mask as next chunk prompt,
+  - writes `sam2_masks/` and runs the same downstream `track_frames` pipeline.
+- Output metadata file:
+  - `sam2_self_prompted_flow_config.json` (includes per-chunk prompt logs).
+- Execution constraints observed in this environment:
+  - system python lacks OpenCV,
+  - sandbox has no visible CUDA device,
+  - manual host-GPU run is required for full experiment completion.

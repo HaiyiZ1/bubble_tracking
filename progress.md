@@ -258,6 +258,83 @@
   - findings.md (updated)
   - progress.md (updated)
   - Added mask/frame index alignment and SAM2 mask relabeling in `src/bubble_tracking/flow_tracking.py`
+
+### Phase: Stateful Debounce In Tracking Loop
+- **Status:** complete
+- **Started:** 2026-03-24 21:05 AEDT
+- Actions taken:
+  - Re-read brainstorming and planning-with-files skill instructions before changing core tracking behavior
+  - Replaced post-hoc debounce/rebuild in `track_frames()` with in-loop tentative-birth confirmation and missing-track grace handling
+  - Added frame buffering so tentative 1-frame flickers can be removed before masks/results are flushed to disk
+  - Kept confirmed tracks alive through short absences by persisting the same ID and carrying forward a fallback mask
+  - Preserved explicit split/merge lineage behavior with immediate parent death and child birth events
+  - Re-sorted final events and reused lifecycle annotation so `birth_reason` / `death_reason` match the new stable track history
+  - Patched death metadata so `death_frame_idx` records the first missing frame rather than the later confirmation frame
+  - Ran `venv311/bin/python -m py_compile` on the updated tracking modules and runners
+  - Ran targeted synthetic scenarios for flicker suppression, internal-gap continuity, terminal-gap handling, and split/merge lineage
+  - Verified that true deaths now backdate to the first missing frame and retro-trim any grace-only masks from `tracks.json`, saved mask PNGs, and `area_timeseries`
+  - Verified that gap masks are still carried forward and preserved when the bubble reappears within the grace window
+- Files created/modified:
+  - src/bubble_tracking/flow_tracking.py (updated)
+  - task_plan.md (updated)
+  - findings.md (updated)
+  - progress.md (updated)
+
+### Phase: Vanished Area Moving-Window Visualization
+- **Status:** complete
+- **Started:** 2026-03-25
+- Actions taken:
+  - Added `scripts/plot_vanished_area_moving_window.py` to compute and plot vanished bubble area using only true `death` events
+  - Implemented centered 2s (`+-1s`) and 5s (`+-2.5s`) windows sampled at integer-second centers
+  - Added four output plots with two x-axis variants (seconds and frames)
+  - Added CSV export with per-second center frame and both window totals
+  - Ran `venv311/bin/python -m py_compile scripts/plot_vanished_area_moving_window.py`
+  - Ran a synthetic event test to verify:
+    - only `death` events are counted
+    - all four PNGs are generated
+    - CSV values match centered-window expectations
+- Files created/modified:
+  - scripts/plot_vanished_area_moving_window.py (created)
+  - task_plan.md (updated)
+  - findings.md (updated)
+  - progress.md (updated)
+
+### Phase: Publish Velocity/Lineage Exports
+- **Status:** complete
+- **Started:** 2026-03-25
+- Actions taken:
+  - Updated `scripts/export_bubble_max_velocity_summary.py` to target publish run dirs (`case1/2/3_air1_publish`) by default
+  - Added lineage columns to summary CSV from `tracks.json` (`birth_reason`, `death_reason`, parent/child IDs)
+  - Verified exporter output and CSV headers by writing summaries to a temp output directory
+  - Verified publish run metric generation with `scripts/plot_velocity_norm_summary.py` to produce `bubble_velocity_area_metrics.csv`
+- Files created/modified:
+  - scripts/export_bubble_max_velocity_summary.py (updated)
+  - task_plan.md (updated)
+  - findings.md (updated)
+  - progress.md (updated)
+
+### Phase: Framewise Injection/Vanish Area CSV Export
+- **Status:** complete
+- **Started:** 2026-03-27
+- Actions taken:
+  - Added `scripts/export_injection_vanished_area_timeseries.py`
+  - Implemented per-frame aggregation from `events.json`:
+    - `birth` events -> total injection-birth area per frame
+    - `death` events -> total vanished-death area per frame
+  - Implemented px^2 -> mm^2 conversion using run-specific `mm_per_pixel`
+  - Exported CSVs into:
+    - `outputs/case1_air1_publish/injection_vanished_area_timeseries.csv`
+    - `outputs/case2_air1_publish/injection_vanished_area_timeseries.csv`
+    - `outputs/case3_air1_publish/injection_vanished_area_timeseries.csv`
+  - Verified headers and row counts:
+    - case1: 1678 lines (1677 frames + header)
+    - case2: 1313 lines (1312 frames + header)
+    - case3: 1399 lines (1398 frames + header)
+- Files created/modified:
+  - scripts/export_injection_vanished_area_timeseries.py (created)
+  - task_plan.md (updated)
+  - findings.md (updated)
+  - progress.md (updated)
   - Re-labels SAM2 masks per frame via connected components before flow-guided matching
   - Verified test frame filenames are `000000.jpg`.. and can align to mask indices
   - Added `--sam2-auto` mode to generate SAM2 auto-masks per frame and save to `output/sam2_masks`
@@ -510,6 +587,99 @@
 - `findings.md`
 - `progress.md`
 
+### Session: 2026-04-13 (Case2 Air1 65/70 threshold variants)
+- **Status:** complete
+- Actions taken:
+  - Re-ran exporter with `mm2-threshold=5.0` and ratio thresholds:
+    - `0.65`
+    - `0.70`
+  - Used temporary output directory `/tmp/case2_threshold_exports_65_70`.
+  - Copied only case2 outputs into `outputs/`.
+  - Verified output file presence, 16-column headers, and row counts.
+
+### Files modified
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-19 (Applied id49 crop v4 and rerendered frame 0304/0234)
+- **Status:** complete
+- Actions taken:
+  - Confirmed input files exist:
+    - `000233_manual_mask_id49_crop_10pct_after_manual_change_v4.csv`
+    - `000233_manual_mask_id49_crop_10pct_meta.json`
+    - `000233_manual_mask_id48_void_filled.png`
+  - Read crop bounds from metadata and validated edited CSV shape/values.
+  - Merged edited crop into full-frame mask with protected-ID checks.
+  - Wrote merged mask:
+    - `000233_manual_mask_id48_void_filled_id49_from_crop_v4.png`
+  - Re-rendered final frame image using merged mask and `x_offset=-70`.
+  - Verification:
+    - merged IDs: `[0,16,48,49]`
+    - `pixels_id49=21993`
+    - render: `IDs rendered: 3`, `clamped_labels=0`
+
+### Files modified
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-10 (Three escaping threshold-variant CSVs)
+- **Status:** complete
+- Actions taken:
+  - Re-read:
+    - `journal1_three_escaping_cases_subcount_outputCSV_requirements.md`
+    - `pixel_mm_conversion_standard.md`
+  - Confirmed `scripts/export_three_escaping_subcount_timeseries.py` supports configurable thresholds and non-overwriting output template.
+  - Regenerated three new variant outputs using:
+    - `--ratio-threshold 0.5`
+    - `--mm2-threshold 5.0`
+    - `--output-template '{case_key}_air1_time_series_subcount_three_escaping_situation_threshold_50%_and_5mm2.csv'`
+  - Verified all three files exist and share the expected 16-column schema.
+
+### Files modified
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-13 (Case2 Air1 40/60/80 threshold variants)
+- **Status:** complete
+- Actions taken:
+  - Re-read planning files and key requirements context.
+  - Generated threshold variants with `mm2-threshold=5.0` and ratio thresholds:
+    - `0.4`
+    - `0.6`
+    - `0.8`
+  - Used temporary output directory `/tmp/case2_threshold_exports` and copied only case2 files to `outputs/`.
+  - Verified output file presence, 16-column headers, and row counts.
+
+### Files modified
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-06 (Three escaping situations subcount CSVs)
+- **Status:** complete
+- Actions taken:
+  - Read requirements from `journal1_three_escaping_cases_subcount_outputCSV_requirements.md`.
+  - Read conversion key from `pixel_mm_conversion_standard.md` and logged the downscaled 0.5 per-case ratios as a persistent key in findings.
+  - Added `scripts/export_three_escaping_subcount_timeseries.py` implementing all 16 requested columns.
+  - Implemented split/merge escape formulas with threshold:
+    - `max(20% area term, 3.14 mm^2 converted to px^2)` per case.
+  - Generated output files:
+    - `outputs/case1_air1_time_series_subcount_three_escaping_situation.csv`
+    - `outputs/case2_air1_time_series_subcount_three_escaping_situation.csv`
+    - `outputs/case3_air1_time_series_subcount_three_escaping_situation.csv`
+  - Validated:
+    - headers and initial rows,
+    - nonzero vanished/split/merge rows and parent-child string formatting.
+
+### Files modified
+- `scripts/export_three_escaping_subcount_timeseries.py` (created)
+- `task_plan.md` (updated)
+- `findings.md` (updated)
+- `progress.md` (updated)
+
 ### Session: 2026-03-16 (Label/LaTeX/title styling update)
 - **Status:** complete
 - Actions taken:
@@ -558,5 +728,193 @@
 
 ### Files modified
 - `scripts/plot_velocity_area_logxy_with_marginal_pdfs.py`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-18 (Case1 publish frames 301-311 label relayout)
+- **Status:** complete
+- Actions taken:
+  - Confirmed target output folder:
+    - `outputs/case1_air1_publish_bubble_numbering_size_enlarge_frames_with_original_frame_numbering_301_to_311`
+  - Confirmed requested source frame range mapping using relabel metadata:
+    - original `301..311` -> relabeled frame numbers `231..241` -> frame indices `230..240`
+  - Confirmed original annotation behavior from:
+    - `src/bubble_tracking/visualization.py::draw_tracking_info`
+  - Prepared export strategy to render 11 still frames from case1 publish artifacts with requested label changes:
+    - labels outside below-right of bbox
+    - black text, transparent background
+    - size scaled by `60/36`
+  - First generation attempt failed with system python (`cv2` missing); switched to `./venv/bin/python`.
+  - Generated and wrote 11 frames for original frame numbers `301..311`.
+  - Verified output directory contains exactly 11 `.jpg` files and filenames include original frame numbers.
+
+### Files modified
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-18 (Case1 publish label position correction to “WANT”)
+- **Status:** complete
+- Actions taken:
+  - Applied follow-up location correction on the same 11 files in:
+    - `outputs/case1_air1_publish_bubble_numbering_size_enlarge_frames_with_original_frame_numbering_301_to_311`
+  - Regenerated original-frame `301..311` overlays with corrected anchor:
+    - horizontal: `tx = bbox.x_max` (directly below corner; removed right shift)
+    - vertical: `ty = bbox.y_max + 4 + text_height`
+  - Kept unchanged:
+    - black text
+    - transparent label background
+    - size scaling `60/36` (`font_scale=1.5`, `font_thickness=3`)
+  - Verification:
+    - exactly 11 output files present
+    - render reported `clamped_labels=0`
+
+### Files modified
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-18 (Manual coordinate export for label placement)
+- **Status:** complete
+- Actions taken:
+  - Exported per-bubble coordinate handoff CSV for original frames `301..311`.
+  - Included:
+    - bbox right-bottom corner coordinates
+    - label text size metrics
+    - relative and absolute coordinates for current and alternative placements
+  - Output:
+    - `outputs/case1_air1_publish_bubble_numbering_size_enlarge_frames_with_original_frame_numbering_301_to_311/label_relative_coordinates_original_301_to_311.csv`
+  - Row count:
+    - `54`
+
+### Files modified
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-19 (Times-style font regeneration for 11 frames)
+- **Status:** complete
+- Actions taken:
+  - Checked available fonts and confirmed Times New Roman is not installed.
+  - Selected Times-compatible `Nimbus Roman` as fallback.
+  - Regenerated all 11 target frames in-place using PIL TrueType text rendering.
+  - Preserved latest placement (`x_offset=-90`) and black transparent label styling.
+  - Verified run output:
+    - regenerated `11` frames
+    - `clamped_labels=0`
+
+### Files modified
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-19 (Manual mask copy + rerender setup for frame 0304/0234)
+- **Status:** complete
+- Actions taken:
+  - Located the correct source mask for relabeled frame 0234: `outputs/case1_air1_publish/masks/000233.png`.
+  - Copied it to user manual-edit folder as `000233_manual_mask.png`.
+  - Added `scripts/render_case1_0234_from_manual_mask.py` to regenerate one frame from edited mask.
+  - Implemented recomputation of bbox/centroid from edited mask IDs, preserving original numbering IDs.
+  - Ran one verification render, producing:
+    - `outputs/case1_air1_publish_original_0304_relabeled_0234_manual_change/case1_air1_publish_original_0304_relabeled_0234_label_outside_black_text_scale_60_over_36.jpg`
+  - Verification output:
+    - `IDs rendered: 3`
+    - `clamped_labels=0`
+
+### Files modified
+- `scripts/render_case1_0234_from_manual_mask.py` (created)
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-19 (Implemented matrix export/import + rerender workflow for frame 0304/0234)
+- **Status:** complete
+- Actions taken:
+  - Added `scripts/matrix_roundtrip_case1_0234.py` with `export`/`import` subcommands.
+  - Exported editable full-frame binary matrices for `#48` and `#49` into manual folder.
+  - Added strict import validations (shape, binary values, empties/NaN/non-int) and protected-pixel guard.
+  - Implemented ID-preserving rebuild logic with overlap policy (`#49` wins).
+  - Verified export dimensions (`1836 x 2748` both CSVs).
+  - Ran synthetic edit test and confirmed:
+    - IDs unchanged: `[0,16,48,49]`
+    - #49 bbox/centroid moved downward.
+  - Ran existing renderer from edited mask and produced test image successfully.
+
+### Files modified
+- `scripts/matrix_roundtrip_case1_0234.py` (created)
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-19 (Compact CSV-edit workflow for frame 0304/0234)
+- **Status:** complete
+- Actions taken:
+  - Re-read `brainstorming` and `planning-with-files` skills per user-invoked workflow.
+  - Reviewed existing scripts:
+    - `scripts/matrix_roundtrip_case1_0234.py`
+    - `scripts/render_case1_0234_from_manual_mask.py`
+  - Confirmed user blocker: full-frame CSV width (`2748` columns) exceeds viewer limit (`1000`).
+  - Extended `scripts/matrix_roundtrip_case1_0234.py` with `prepare-compact` subcommand.
+  - Implemented compact workflow outputs:
+    - `000233_manual_mask_id48_void_filled.png`
+    - `000233_manual_mask_id49_crop_10pct_before_manual_change.csv`
+    - `000233_manual_mask_id49_crop_10pct_meta.json`
+  - `prepare-compact` run stats:
+    - `id48_hole_fill_pixels_added=1677`
+    - crop bounds:
+      - `row_start=1499`, `row_end_exclusive=1767`
+      - `col_start=1296`, `col_end_exclusive=1470`
+    - cropped CSV shape: `268 x 174`
+  - Re-rendered frame with updated mask using existing style (`x_offset=-70`, black text, Times-style fallback):
+    - `case1_air1_publish_original_0304_relabeled_0234_label_outside_black_text_scale_60_over_36.jpg`
+  - Verification:
+    - IDs unchanged: `[0,16,48,49]`
+    - `#16` unchanged, `#49` unchanged, `#48` increased by hole-fill pixels
+    - `clamped_labels=0`
+  - Encountered and fixed one parser issue:
+    - `argparse` help string failed on `%`; escaped to `%%`.
+
+### Files modified
+- `scripts/matrix_roundtrip_case1_0234.py` (updated)
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-19 (Applied id49 crop v3 and rerendered frame 0304/0234)
+- **Status:** complete
+- Actions taken:
+  - Confirmed input files exist:
+    - `000233_manual_mask_id49_crop_10pct_after_manual_change_v3.csv`
+    - `000233_manual_mask_id49_crop_10pct_meta.json`
+    - `000233_manual_mask_id48_void_filled.png`
+  - Read crop bounds from metadata and validated edited CSV shape/values.
+  - Merged edited crop into full-frame mask with protected-ID checks.
+  - Wrote merged mask:
+    - `000233_manual_mask_id48_void_filled_id49_from_crop_v3.png`
+  - Re-rendered final frame image using merged mask and `x_offset=-70`.
+  - Verification:
+    - merged IDs: `[0,16,48,49]`
+    - `pixels_id49=21932`
+    - render: `IDs rendered: 3`, `clamped_labels=0`
+
+### Files modified
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
+
+### Session: 2026-04-19 (Case2 Air1 SAM2 self-reprompt @160)
+- Started experiment setup for requested comparison vs CV-keyframe reprompt baseline.
+- Confirmed baseline run metadata and keyframe schedule from:
+  - `outputs/case2_air1_publish/sam2_prompted_flow_config.json`
+  - `outputs/case2_air1_publish/sam2_cv_keyframe_prompt_summary.json`
+- Baseline key details recorded:
+  - keyframe interval `160`
+  - start index `2`
+  - first prompt index `2`
+  - first prompt area `35365`
+- Next action: implement a dedicated self-mask-reprompt script and run it on `case2_air1`.
+
+### Files modified
+- `task_plan.md`
 - `findings.md`
 - `progress.md`

@@ -1,0 +1,31 @@
+Case1(1024_5):
+    Air1: 
+        start_frame: 71
+    Air2:
+        start_frame: 41
+    Air3:
+        start_frame: 61
+    Air4:
+        start_frame: 45
+    Scale: 100 mm=2335 pixel
+Case2 (1204):
+    Air1: 
+        start_frame: 127
+    Air2:
+        start_frame: 95
+    Air3:
+        start_frame: 53
+    Air4:
+        start_frame: 82
+    Scale: 100 mm=2300 pixel
+    
+Case3 (0904):
+    Air1: 
+        start_frame: 215
+    Air2:
+        start_frame: 201
+    Air3:
+        start_frame: 337
+    Air4:
+        start_frame: 111
+    Scale: 100mm=2420 pixel
