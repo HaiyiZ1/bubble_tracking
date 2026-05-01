@@ -2,6 +2,8 @@
 
 This README is focused on **reproducible publishing runs**.
 
+For AI-assisted local pipeline setup, follow the guidance in `AGENTS.md`.
+
 ## Environment Setup
 
 ```bash
