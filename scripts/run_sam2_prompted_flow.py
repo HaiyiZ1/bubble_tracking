@@ -627,6 +627,11 @@ def main() -> None:
         help="Max area ratio (new/old) allowed for ID relink",
     )
     parser.add_argument("--log-every", type=int, default=10, help="Log progress every N frames (0 disables)")
+    parser.add_argument(
+        "--sam2-only",
+        action="store_true",
+        help="Run only SAM2 prompt+propagation and export sam2_masks; skip tracking/events/video",
+    )
     parser.add_argument("--no-video", action="store_true", help="Skip overlay video")
     parser.add_argument("--video-fps", type=float, default=10.0, help="FPS for overlay video")
     parser.add_argument("--overlay-dir", default=None, help="Optional directory to save overlay frames")
@@ -894,33 +899,35 @@ def main() -> None:
     with open(os.path.join(args.output, "sam2_prompted_flow_config.json"), "w") as f:
         json.dump(config_out, f, indent=2)
 
-    tracking_cfg = TrackingConfig(
-        fps=args.fps,
-        mm_per_pixel=args.mm_per_pixel,
-        use_flow=args.use_flow,
-        velocity_mode=args.velocity_mode,
-        log_every=args.log_every,
-        debounce=DebounceConfig(
-            birth_confirm_frames=max(1, int(args.debounce_birth_frames)),
-            death_confirm_frames=max(1, int(args.debounce_death_frames)),
-            relink_max_centroid_dist_px=float(args.debounce_relink_max_centroid_dist_px),
-            relink_min_area_ratio=float(args.debounce_relink_min_area_ratio),
-            relink_max_area_ratio=float(args.debounce_relink_max_area_ratio),
-        ),
-        preprocess=PreprocessConfig(
-            mode=args.preprocess_mode,
-            raw_sigma=args.preprocess_raw_sigma,
-        ),
-        segment=SegmentationConfig(min_area=args.min_area),
-    )
-    outputs = track_frames(
-        frames_dir=args.frames,
-        reference_path=args.reference,
-        output_dir=args.output,
-        masks_dir=sam2_masks_dir,
-        roi=roi,
-        config=tracking_cfg,
-    )
+    outputs = None
+    if not args.sam2_only:
+        tracking_cfg = TrackingConfig(
+            fps=args.fps,
+            mm_per_pixel=args.mm_per_pixel,
+            use_flow=args.use_flow,
+            velocity_mode=args.velocity_mode,
+            log_every=args.log_every,
+            debounce=DebounceConfig(
+                birth_confirm_frames=max(1, int(args.debounce_birth_frames)),
+                death_confirm_frames=max(1, int(args.debounce_death_frames)),
+                relink_max_centroid_dist_px=float(args.debounce_relink_max_centroid_dist_px),
+                relink_min_area_ratio=float(args.debounce_relink_min_area_ratio),
+                relink_max_area_ratio=float(args.debounce_relink_max_area_ratio),
+            ),
+            preprocess=PreprocessConfig(
+                mode=args.preprocess_mode,
+                raw_sigma=args.preprocess_raw_sigma,
+            ),
+            segment=SegmentationConfig(min_area=args.min_area),
+        )
+        outputs = track_frames(
+            frames_dir=args.frames,
+            reference_path=args.reference,
+            output_dir=args.output,
+            masks_dir=sam2_masks_dir,
+            roi=roi,
+            config=tracking_cfg,
+        )
 
     if args.cv_keyframe_prompts:
         with open(os.path.join(args.output, "sam2_cv_keyframe_prompt_summary.json"), "w") as f:
@@ -930,7 +937,7 @@ def main() -> None:
                 "keyframe_logs": cv_keyframe_logs,
             }, f, indent=2)
 
-    if not args.no_video:
+    if (not args.sam2_only) and (not args.no_video):
         output_path = Path(args.output) / "tracking_overlay.mp4"
         create_tracking_video(
             frames_dir=args.frames,
@@ -942,15 +949,19 @@ def main() -> None:
             overlay_dir=args.overlay_dir,
         )
 
-    print("Tracking complete.")
     print(f"Prompt mode: {'sam2_cv_keyframe_prompts' if args.cv_keyframe_prompts else args.prompt_mode}")
-    print(f"Flow enabled: {args.use_flow}")
-    print(f"Velocity mode: {args.velocity_mode}")
     print(f"CV keyframe prompts: {args.cv_keyframe_prompts}")
     print(f"Prompt frame: {prompt_frame_number if prompt_frame_number is not None else 'cv-keyframes'}")
-    print(f"Objects: {outputs['result'].num_objects}")
-    print(f"Events: {outputs['event_summary']}")
-    print(f"Masks: {outputs['masks_dir']}")
+    if args.sam2_only:
+        print("SAM2-only run complete.")
+        print(f"Masks: {sam2_masks_dir}")
+    else:
+        print("Tracking complete.")
+        print(f"Flow enabled: {args.use_flow}")
+        print(f"Velocity mode: {args.velocity_mode}")
+        print(f"Objects: {outputs['result'].num_objects}")
+        print(f"Events: {outputs['event_summary']}")
+        print(f"Masks: {outputs['masks_dir']}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,46 @@
+---
+cases:
+  case1:
+    source_tag: "1024_5"
+    scale:
+      mm: 100
+      pixel: 2335
+    airs:
+      air1:
+        start_frame: 71
+      air2:
+        start_frame: 41
+      air3:
+        start_frame: 61
+      air4:
+        start_frame: 45
+
+  case2:
+    source_tag: "1204"
+    scale:
+      mm: 100
+      pixel: 2300
+    airs:
+      air1:
+        start_frame: 127
+      air2:
+        start_frame: 95
+      air3:
+        start_frame: 53
+      air4:
+        start_frame: 82
+
+  case3:
+    source_tag: "0904"
+    scale:
+      mm: 100
+      pixel: 2420
+    airs:
+      air1:
+        start_frame: 215
+      air2:
+        start_frame: 201
+      air3:
+        start_frame: 337
+      air4:
+        start_frame: 111

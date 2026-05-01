@@ -58,3 +58,17 @@ third_party/_install/
 third_party/opencv/build/
 third_party/opencv/.cache/
 third_party/opencv_contrib/build/
+
+# Local-only planning/scratch and legacy artifacts (kept on disk, not tracked)
+.codex
+docs/
+notebooks/
+samples/
+findings.md
+progress.md
+task_plan.md
+journal1_three_escaping_cases_subcount_outputCSV_requirements.md
+pixel_mm_conversion_standard.md
+traditional_CV_residual_saturation_from_haiyi.csv
+traditional_CV_residual_saturation_from_haiyi_v2.csv
+commands.sh
