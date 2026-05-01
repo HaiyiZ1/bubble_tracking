@@ -27,28 +27,87 @@ python scripts/check_env.py
 
 Required checkpoints in `checkpoints/`:
 - `sam2_hiera_tiny.pt`
-- `sam2_hiera_base_plus.pt`
+
+## Datasets
+
+Original, compressed and key frame debug image data:
+
+| Asset | Link |
+|---|---|
+| `case1_air1_publish` dataset folder (`frames/`, `frames_0p5/`) | `<CASE1_AIR1_PUBLISH_URL>` |
+| `case2_air1_publish` dataset folder (`frames/`, `frames_0p5/`) | `<CASE2_AIR1_PUBLISH_URL>` |
+| `case3_air1_publish` dataset folder (`frames/`, `frames_0p5/`) | `<CASE3_AIR1_PUBLISH_URL>` |
+| Case 1 keyframe debug artifacts | `<CASE1_KEYFRAME_DEBUG_URL>` |
+| Case 2 keyframe debug artifacts | `<CASE2_KEYFRAME_DEBUG_URL>` |
+| Case 3 keyframe debug artifacts | `<CASE3_KEYFRAME_DEBUG_URL>` |
 
 ## Publishing Reproduction Workflow (Case1/2/3 Air1)
 
-### 1) Relabel datasets so frame `000001` is the first usable bubble frame
+### 1) Prepare publishing datasets
+
+If you provide public links for `case*_air1_publish`, place these folders under `data/bubbles/`:
+- `data/bubbles/case1_air1_publish`
+- `data/bubbles/case2_air1_publish`
+- `data/bubbles/case3_air1_publish`
+
+Each folder must contain:
+- `frames/`
+- `frames_0p5/`
+
+If only raw datasets are available, generate these publish folders with:
 
 ```bash
 python scripts/relabel_publishing_air1.py --case case1_air1 case2_air1 case3_air1
 ```
 
-This creates:
-- `data/bubbles/case1_air1_publish`
-- `data/bubbles/case2_air1_publish`
-- `data/bubbles/case3_air1_publish`
+### 2) Prepare ROI files (required)
 
-Each relabeled root contains:
-- `frames/`
-- `frames_0p5/`
-- `frame_map.csv`
-- `publishing_relabel_config.json`
+If you provide pre-generated ROI files, place them at:
+- `data/interim/case1_air1/roi_0p5.json`
+- `data/interim/case1_air1/roi_mask_0p5.png`
+- `data/interim/case2_air1/roi_0p5.json`
+- `data/interim/case2_air1/roi_mask_0p5.png`
+- `data/interim/case3_air1/roi_0p5.json`
+- `data/interim/case3_air1/roi_mask_0p5.png`
 
-### 2) Run tracking with CV keyframe prompts and debug outputs
+If ROI files are not available, create them interactively (press Enter to confirm selections):
+
+```bash
+python scripts/select_roi.py \
+  --frames data/bubbles/case1_air1_publish/frames_0p5 \
+  --frame-idx 1 \
+  --out data/interim/case1_air1/roi_0p5.json
+
+python scripts/select_polygon_roi.py \
+  --frames data/bubbles/case1_air1_publish/frames_0p5 \
+  --frame-idx 1 \
+  --out-json data/interim/case1_air1/roi_poly_0p5.json \
+  --out-mask data/interim/case1_air1/roi_mask_0p5.png
+
+python scripts/select_roi.py \
+  --frames data/bubbles/case2_air1_publish/frames_0p5 \
+  --frame-idx 1 \
+  --out data/interim/case2_air1/roi_0p5.json
+
+python scripts/select_polygon_roi.py \
+  --frames data/bubbles/case2_air1_publish/frames_0p5 \
+  --frame-idx 1 \
+  --out-json data/interim/case2_air1/roi_poly_0p5.json \
+  --out-mask data/interim/case2_air1/roi_mask_0p5.png
+
+python scripts/select_roi.py \
+  --frames data/bubbles/case3_air1_publish/frames_0p5 \
+  --frame-idx 1 \
+  --out data/interim/case3_air1/roi_0p5.json
+
+python scripts/select_polygon_roi.py \
+  --frames data/bubbles/case3_air1_publish/frames_0p5 \
+  --frame-idx 1 \
+  --out-json data/interim/case3_air1/roi_poly_0p5.json \
+  --out-mask data/interim/case3_air1/roi_mask_0p5.png
+```
+
+### 3) Run tracking with CV keyframe prompts and debug outputs
 
 #### Case 1 (High Porosity-Air1)
 
@@ -57,8 +116,8 @@ python scripts/run_sam2_prompted_flow.py \
   --frames data/bubbles/case1_air1_publish/frames_0p5 \
   --reference data/bubbles/case1_air1_publish/frames_0p5/000001.jpg \
   --output outputs/case1_air1_publish \
-  --roi data/interim/bubbles_air1_072_271/roi_0p5.json \
-  --roi-mask data/interim/bubbles_air1_072_271/roi_mask_0p5.png \
+  --roi data/interim/case1_air1/roi_0p5.json \
+  --roi-mask data/interim/case1_air1/roi_mask_0p5.png \
   --prompt-mode sam2 \
   --sam2-checkpoint checkpoints/sam2_hiera_tiny.pt \
   --sam2-model-cfg sam2_hiera_t.yaml \
@@ -92,8 +151,8 @@ python scripts/run_sam2_prompted_flow.py \
   --roi data/interim/case2_air1/roi_0p5.json \
   --roi-mask data/interim/case2_air1/roi_mask_0p5.png \
   --prompt-mode sam2 \
-  --sam2-checkpoint checkpoints/sam2_hiera_base_plus.pt \
-  --sam2-model-cfg sam2_hiera_b+.yaml \
+  --sam2-checkpoint checkpoints/sam2_hiera_tiny.pt \
+  --sam2-model-cfg sam2_hiera_t.yaml \
   --sam2-device cuda \
   --cv-keyframe-prompts \
   --cv-keyframe-interval 160 \
@@ -124,8 +183,8 @@ python scripts/run_sam2_prompted_flow.py \
   --roi data/interim/case3_air1/roi_0p5.json \
   --roi-mask data/interim/case3_air1/roi_mask_0p5.png \
   --prompt-mode sam2 \
-  --sam2-checkpoint checkpoints/sam2_hiera_base_plus.pt \
-  --sam2-model-cfg sam2_hiera_b+.yaml \
+  --sam2-checkpoint checkpoints/sam2_hiera_tiny.pt \
+  --sam2-model-cfg sam2_hiera_t.yaml \
   --sam2-device cuda \
   --cv-keyframe-prompts \
   --cv-keyframe-interval 160 \
@@ -146,7 +205,7 @@ python scripts/run_sam2_prompted_flow.py \
   --mm-per-pixel 0.08264
 ```
 
-### 3) Export publishing overlay videos
+### 4) Export publishing overlay videos
 
 ```bash
 python scripts/export_publishing_tracking_video.py \
