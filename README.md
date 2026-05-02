@@ -34,18 +34,19 @@ Original, compressed and key frame debug image data:
 
 | Asset | Link |
 |---|---|
-| `case1_air1_publish` dataset folder (`frames/`, `frames_0p5/`) | `<CASE1_AIR1_PUBLISH_URL>` |
-| `case2_air1_publish` dataset folder (`frames/`, `frames_0p5/`) | `<CASE2_AIR1_PUBLISH_URL>` |
-| `case3_air1_publish` dataset folder (`frames/`, `frames_0p5/`) | `<CASE3_AIR1_PUBLISH_URL>` |
-| Case 1 keyframe debug artifacts | `<CASE1_KEYFRAME_DEBUG_URL>` |
-| Case 2 keyframe debug artifacts | `<CASE2_KEYFRAME_DEBUG_URL>` |
-| Case 3 keyframe debug artifacts | `<CASE3_KEYFRAME_DEBUG_URL>` |
+| `case1_air1_publish` dataset folder (`frames/`, `frames_0p5/`) | `https://unisydneyedu-my.sharepoint.com/:u:/g/personal/xdin9349_uni_sydney_edu_au/IQCYCknlCOsHT7T-PGBzWd3QAZJx17SLKlpcbR6fcJf4z_E?e=lcTNXe` |
+| `case2_air1_publish` dataset folder (`frames/`, `frames_0p5/`) | `https://unisydneyedu-my.sharepoint.com/:u:/g/personal/xdin9349_uni_sydney_edu_au/IQBEdhWOq7z3QZIpR4Mjq73hAefo5AoivczdwKRCjTc7n6s?e=9Ukf11` |
+| `case3_air1_publish` dataset folder (`frames/`, `frames_0p5/`) | `https://unisydneyedu-my.sharepoint.com/:u:/g/personal/xdin9349_uni_sydney_edu_au/IQDTxBBWiBMxQ72MiSqd4SxrAUkna7jhhIV4WjJlUE8uPHk?e=E6nGmD` |
+| Case 1 keyframe debug artifacts | `https://unisydneyedu-my.sharepoint.com/:u:/g/personal/xdin9349_uni_sydney_edu_au/IQB2TCsQTs3jRYVfMmmAWUVpAZv0UD5IK0MzON9ku-XF6A8?e=nJkozF` |
+| Case 2 keyframe debug artifacts | `https://unisydneyedu-my.sharepoint.com/:u:/g/personal/xdin9349_uni_sydney_edu_au/IQAqbiZPpCA2RLb785Q5SkGRAdw38Ek0kQix4Bu2Au_QCCg?e=EnNick` |
+| Case 3 keyframe debug artifacts | `https://unisydneyedu-my.sharepoint.com/:u:/g/personal/xdin9349_uni_sydney_edu_au/IQAjNRhfyIisSoQX9E8iyzRhAbP5gJnCsUIRlge_Q9wHLnw?e=k9eKBN` |
+| ROI masks | `https://unisydneyedu-my.sharepoint.com/:u:/g/personal/xdin9349_uni_sydney_edu_au/IQAjNRhfyIisSoQX9E8iyzRhAbP5gJnCsUIRlge_Q9wHLnw?e=k9eKBN` |
 
 ## Publishing Reproduction Workflow (Case1/2/3 Air1)
 
 ### 1) Prepare publishing datasets
 
-If you provide public links for `case*_air1_publish`, place these folders under `data/bubbles/`:
+If you downloaded public links for `case*_air1_publish`, place these folders under `data/bubbles/`:
 - `data/bubbles/case1_air1_publish`
 - `data/bubbles/case2_air1_publish`
 - `data/bubbles/case3_air1_publish`
@@ -62,13 +63,7 @@ python scripts/relabel_publishing_air1.py --case case1_air1 case2_air1 case3_air
 
 ### 2) Prepare ROI files (required)
 
-If you provide pre-generated ROI files, place them at:
-- `data/interim/case1_air1/roi_0p5.json`
-- `data/interim/case1_air1/roi_mask_0p5.png`
-- `data/interim/case2_air1/roi_0p5.json`
-- `data/interim/case2_air1/roi_mask_0p5.png`
-- `data/interim/case3_air1/roi_0p5.json`
-- `data/interim/case3_air1/roi_mask_0p5.png`
+The datasets include a set of ROI files used in this study. The `.png` files are used for visual reference while the `.json` files are used in the extraction pipeline later.
 
 If ROI files are not available, create them interactively (press Enter to confirm selections):
 
