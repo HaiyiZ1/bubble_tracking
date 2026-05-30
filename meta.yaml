@@ -1,4 +1,5 @@
 ---
+fps: 4
 cases:
   case1:
     source_tag: "1024_5"
@@ -44,7 +45,4 @@ cases:
         start_frame: 337
       air4:
         start_frame: 111
-  zero_degree:
-  0 degree: 100mm=2196 pixel; 
-  
-  2.5 degree: 100mm=2220 pixel; 5 degree: 100mm=2215 pixel; 15 degree: 100mm=2475 pixel; 30 degree: 100mm=2200 pixel;
+  zero_degree: "0 degree: 100mm=2196 pixel; 2.5 degree: 100mm=2220 pixel; 5 degree: 100mm=2215 pixel; 15 degree: 100mm=2475 pixel; 30 degree: 100mm=2200 pixel"
