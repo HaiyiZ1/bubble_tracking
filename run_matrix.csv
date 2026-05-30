@@ -1,0 +1,13 @@
+model,extra prompting original frames 299-307?,cv-keyframe-min-area,threshold_offset
+large,yes,428,6
+large,no,428,6
+base+,yes,428,6
+base+,no,428,6
+large,yes,68,6
+large,no,68,6
+base+,yes,68,6
+base+,no,68,6
+large,yes,27,6
+large,no,27,6
+base+,yes,27,6
+base+,no,27,6

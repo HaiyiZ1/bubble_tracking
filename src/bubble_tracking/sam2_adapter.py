@@ -29,6 +29,14 @@ class SAM2Config:
     checkpoint_path: str
     model_cfg: str = "sam2_hiera_t.yaml"
     device: str = "cpu"
+    # SAM2's video predictor fills small background holes (area <= fill_hole_area)
+    # in low-res masks. Default 8 matches upstream SAM2; set to 0 to preserve
+    # genuine holes (e.g. porous bubbles whose interior holes are real signal).
+    fill_hole_area: int = 8
+    # Push frame tensors to CPU between accesses (saves GPU memory at ~5-15% latency cost).
+    offload_video_to_cpu: bool = False
+    # Push inference state to CPU between frames (saves more GPU memory, larger latency cost).
+    offload_state_to_cpu: bool = False
 
 
 def compute_mask_properties(mask: np.ndarray, object_id: int) -> Optional[FrameData]:
@@ -91,6 +99,9 @@ class SAM2Runner:
             self.config.model_cfg,
             self.config.checkpoint_path,
             device=self.config.device,
+            hydra_overrides_extra=[
+                f"++model.fill_hole_area={int(self.config.fill_hole_area)}",
+            ],
         )
 
     def run(
@@ -120,31 +131,44 @@ class SAM2Runner:
             raise ValueError(f"No frames found in {frames_dir}")
 
         # Initialize predictor state with video
-        inference_state = self.predictor.init_state(video_path=frames_dir)
+        inference_state = self.predictor.init_state(
+            video_path=frames_dir,
+            offload_video_to_cpu=bool(self.config.offload_video_to_cpu),
+            offload_state_to_cpu=bool(self.config.offload_state_to_cpu),
+        )
 
         # Add prompts for each object
         object_ids = set()
         for prompt in prompts.prompts:
             object_ids.add(prompt.object_id)
 
-            # Prefer mask prompt when provided (best quality for semi-supervised VOS)
-            if getattr(prompt, "mask", None) is not None:
+            has_mask = getattr(prompt, "mask", None) is not None
+            has_points = bool(prompt.points)
+            has_box = prompt.box is not None
+
+            # When both mask and point/box prompts are provided on the same frame,
+            # call add_new_mask first so its prediction logits seed the subsequent
+            # add_new_points_or_box call via SAM2's prev_sam_mask_logits path.
+            # This lets negative points (e.g., placed inside holes) refine a
+            # mask seed instead of replacing it.
+            if has_mask:
                 self.predictor.add_new_mask(
                     inference_state=inference_state,
                     frame_idx=prompt.frame_idx,
                     obj_id=prompt.object_id,
                     mask=prompt.mask,
                 )
-            else:
+
+            if has_points or has_box:
                 points = None
                 labels = None
                 box = None
 
-                if prompt.points:
+                if has_points:
                     points = np.array([[p.x, p.y] for p in prompt.points])
                     labels = np.array([p.label for p in prompt.points])
 
-                if prompt.box:
+                if has_box:
                     box = np.array(prompt.box.bbox.to_list())
 
                 self.predictor.add_new_points_or_box(
@@ -220,6 +244,9 @@ def create_runner(
     checkpoint_path: str,
     model_cfg: str = "sam2_hiera_t.yaml",
     device: Optional[str] = None,
+    fill_hole_area: int = 8,
+    offload_video_to_cpu: bool = False,
+    offload_state_to_cpu: bool = False,
 ) -> SAM2Runner:
     """
     Factory function to create a SAM2 runner.
@@ -239,5 +266,8 @@ def create_runner(
         checkpoint_path=checkpoint_path,
         model_cfg=model_cfg,
         device=device,
+        fill_hole_area=fill_hole_area,
+        offload_video_to_cpu=offload_video_to_cpu,
+        offload_state_to_cpu=offload_state_to_cpu,
     )
     return SAM2Runner(config)

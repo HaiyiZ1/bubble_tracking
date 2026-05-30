@@ -156,6 +156,12 @@ def main():
         action="store_true",
         help="Validate inputs without running SAM2",
     )
+    parser.add_argument(
+        "--fill-hole-area",
+        type=int,
+        default=8,
+        help="SAM2 background-hole fill area in low-res masks (upstream default 8). Set to 0 to preserve genuine holes.",
+    )
 
     args = parser.parse_args()
 
@@ -244,6 +250,7 @@ def main():
         checkpoint_path=args.checkpoint,
         model_cfg=args.model_cfg,
         device=args.device,
+        fill_hole_area=args.fill_hole_area,
     )
 
     result, masks = runner.run(

@@ -44,9 +44,9 @@ class SegmentationConfig:
     hist_bins: int = 35
     threshold_offset: int = 7
     max_threshold: int = 248
-    opening_radius: int = 4
+    opening_radius: int = 0
     min_area: int = 500
-    median_ksize: int = 25
+    median_ksize: int = 10
     compact_max_area: int = 0
     compact_min_dark_delta: float = 0.0
     automatrix_median_radius: int = 12

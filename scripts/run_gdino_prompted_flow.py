@@ -340,6 +340,7 @@ def _run_sam2_propagation(
     checkpoint: str,
     model_cfg: str,
     device: str,
+    fill_hole_area: int = 8,
 ) -> Dict[int, np.ndarray]:
     import torch
 
@@ -347,6 +348,7 @@ def _run_sam2_propagation(
         checkpoint_path=checkpoint,
         model_cfg=model_cfg,
         device=device,
+        fill_hole_area=fill_hole_area,
     )
     try:
         _, masks_by_frame = runner.run(
@@ -390,6 +392,12 @@ def main() -> None:
     parser.add_argument("--sam2-checkpoint", default="checkpoints/sam2_hiera_tiny.pt", help="SAM2 checkpoint path")
     parser.add_argument("--sam2-model-cfg", default="sam2_hiera_t.yaml", help="SAM2 model cfg name")
     parser.add_argument("--sam2-device", default="cuda", help="SAM2/GDINO device (cuda or cpu)")
+    parser.add_argument(
+        "--sam2-fill-hole-area",
+        type=int,
+        default=8,
+        help="SAM2 background-hole fill area in low-res masks (upstream default 8). Set to 0 to preserve genuine holes.",
+    )
     parser.add_argument(
         "--gdino-model-id",
         default="IDEA-Research/grounding-dino-tiny",
@@ -515,6 +523,7 @@ def main() -> None:
         checkpoint=args.sam2_checkpoint,
         model_cfg=args.sam2_model_cfg,
         device=args.sam2_device,
+        fill_hole_area=args.sam2_fill_hole_area,
     )
     _save_masks_for_frames(frame_paths, masks_by_frame, sam2_masks_dir)
 

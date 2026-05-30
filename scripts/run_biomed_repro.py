@@ -113,6 +113,7 @@ def run_davis_reproduction(args):
                     runner = create_runner(
                         checkpoint_path=args.checkpoint,
                         model_cfg=args.model_cfg,
+                        fill_hole_area=args.fill_hole_area,
                     )
 
                     result, masks = runner.run(
@@ -264,6 +265,7 @@ def run_ctc_reproduction(args):
                     runner = create_runner(
                         checkpoint_path=args.checkpoint,
                         model_cfg=args.model_cfg,
+                        fill_hole_area=args.fill_hole_area,
                     )
 
                     result, masks = runner.run(
@@ -364,6 +366,12 @@ def main():
         type=str,
         default="sam2_hiera_t.yaml",
         help="SAM2 model config",
+    )
+    parser.add_argument(
+        "--fill-hole-area",
+        type=int,
+        default=8,
+        help="SAM2 background-hole fill area in low-res masks (upstream default 8). Set to 0 to preserve genuine holes.",
     )
     parser.add_argument(
         "--skip-sam2",

@@ -51,7 +51,15 @@ def _draw_text_with_box(
     cv2.putText(frame, text, (x, y), font, font_scale, text_color, thickness, cv2.LINE_AA)
 
 
-def _add_publishing_banner(frame, title: str, elapsed_minutes: float) -> None:
+def _format_elapsed(elapsed_seconds: float, resolution: str) -> str:
+    if resolution == "sec":
+        total = int(round(elapsed_seconds))
+        minutes, seconds = divmod(total, 60)
+        return f"Time elapsed: {minutes} min {seconds} sec."
+    return f"Time elapsed: {elapsed_seconds / 60.0:.2f} min."
+
+
+def _add_publishing_banner(frame, title: str, elapsed_seconds: float, time_resolution: str) -> None:
     height, width = frame.shape[:2]
     overlay = frame.copy()
     banner_height = max(72, int(round(height * 0.1)))
@@ -79,7 +87,7 @@ def _add_publishing_banner(frame, title: str, elapsed_minutes: float) -> None:
     )
     _draw_text_with_box(
         frame,
-        f"Time elapsed: {elapsed_minutes:.2f} min.",
+        _format_elapsed(elapsed_seconds, time_resolution),
         (18, time_y),
         font_scale=info_scale,
         thickness=info_thickness,
@@ -96,6 +104,7 @@ def _render_video(
     output_fps: float,
     time_fps: float,
     alpha: float,
+    time_resolution: str,
 ) -> None:
     first_frame = cv2.imread(frame_paths[0])
     if first_frame is None:
@@ -138,7 +147,8 @@ def _render_video(
             _add_publishing_banner(
                 frame,
                 title=title,
-                elapsed_minutes=(float(frame_idx) / float(time_fps)) / 60.0,
+                elapsed_seconds=float(frame_idx) / float(time_fps),
+                time_resolution=time_resolution,
             )
             writer.write(frame)
     finally:
@@ -165,6 +175,12 @@ def main() -> None:
     parser.add_argument("--speedup", type=float, default=10.0, help="Speed multiplier for the fast export")
     parser.add_argument("--max-minutes", type=float, default=5.0, help="Maximum duration to render from the start")
     parser.add_argument("--alpha", type=float, default=0.4, help="Mask overlay alpha")
+    parser.add_argument(
+        "--time-resolution",
+        choices=("min", "sec"),
+        default="min",
+        help="Elapsed-time format: 'min' (x.xx min) or 'sec' (x min y sec)",
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -209,6 +225,7 @@ def main() -> None:
             output_fps=output_fps,
             time_fps=float(args.fps),
             alpha=float(args.alpha),
+            time_resolution=args.time_resolution,
         )
         print(f"Wrote publishing overlay video: {output_path}")
 

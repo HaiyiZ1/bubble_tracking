@@ -329,6 +329,7 @@ def _build_sam2_masks_propagate(
     checkpoint: str,
     model_cfg: str,
     prompts: PromptSpec,
+    fill_hole_area: int = 8,
 ) -> str:
     try:
         import torch
@@ -339,6 +340,7 @@ def _build_sam2_masks_propagate(
         checkpoint_path=checkpoint,
         model_cfg=model_cfg,
         device=device,
+        fill_hole_area=fill_hole_area,
     )
     try:
         _, masks_by_frame = runner.run(
@@ -390,6 +392,12 @@ def main() -> None:
     parser.add_argument("--sam2-start-frame", type=int, default=0, help="Start index for prompt search")
     parser.add_argument("--sam2-max-search-frames", type=int, default=200, help="Max frames to search for prompt")
     parser.add_argument("--sam2-max-prompts", type=int, default=1, help="Max prompts to keep from search")
+    parser.add_argument(
+        "--sam2-fill-hole-area",
+        type=int,
+        default=8,
+        help="SAM2 background-hole fill area in low-res masks (upstream default 8). Set to 0 to preserve genuine holes (e.g. porous bubbles).",
+    )
     parser.add_argument("--output", required=True, help="Output directory")
     parser.add_argument("--roi", default=None, help="ROI JSON path (from scripts/select_roi.py)")
     parser.add_argument("--fps", type=float, default=4.0, help="Frames per second")
@@ -605,6 +613,7 @@ def main() -> None:
             checkpoint=args.sam2_checkpoint,
             model_cfg=args.sam2_model_cfg,
             prompts=prompt_spec,
+            fill_hole_area=args.sam2_fill_hole_area,
         )
 
         frame_indices = [_frame_index_from_path(p) for p in frame_paths]

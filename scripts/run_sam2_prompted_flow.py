@@ -324,6 +324,9 @@ def _run_sam2_propagation(
     checkpoint: str,
     model_cfg: str,
     device: str,
+    fill_hole_area: int = 8,
+    offload_video_to_cpu: bool = False,
+    offload_state_to_cpu: bool = False,
 ) -> Dict[int, np.ndarray]:
     import torch
 
@@ -331,6 +334,9 @@ def _run_sam2_propagation(
         checkpoint_path=checkpoint,
         model_cfg=model_cfg,
         device=device,
+        fill_hole_area=fill_hole_area,
+        offload_video_to_cpu=offload_video_to_cpu,
+        offload_state_to_cpu=offload_state_to_cpu,
     )
     try:
         _, masks_by_frame = runner.run(
@@ -396,6 +402,48 @@ def _save_cv_keyframe_debug_artifacts(
     }
 
 
+def _negative_points_from_holes(
+    mask_full: np.ndarray,
+    min_hole_area: int,
+    max_neg_points: int,
+) -> List[PointPrompt]:
+    """Find interior holes in a binary mask and return their representative
+    points as negative (label=0) prompts. Holes that touch the image border
+    are skipped — those are outside background, not enclosed holes."""
+    if max_neg_points <= 0:
+        return []
+
+    binary = mask_full.astype(bool)
+    if not binary.any():
+        return []
+
+    H, W = binary.shape
+    bg = (~binary).astype(np.uint8)
+    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(bg, connectivity=8)
+
+    holes: List[Tuple[int, int, int]] = []
+    for lbl in range(1, n_labels):
+        x, y, w, h, area = stats[lbl]
+        if x == 0 or y == 0 or x + w >= W or y + h >= H:
+            continue
+        if area < min_hole_area:
+            continue
+        cx, cy = centroids[lbl]
+        cx_i, cy_i = int(round(cx)), int(round(cy))
+        # Centroid can fall outside non-convex holes; fall back to any pixel inside.
+        if not (0 <= cy_i < H and 0 <= cx_i < W and labels[cy_i, cx_i] == lbl):
+            ys, xs = np.where(labels == lbl)
+            if len(ys) == 0:
+                continue
+            cx_i, cy_i = int(xs[0]), int(ys[0])
+        holes.append((int(area), cx_i, cy_i))
+
+    # Largest holes first; they are the most reliable negatives.
+    holes.sort(reverse=True)
+    holes = holes[:max_neg_points]
+    return [PointPrompt(x=cx, y=cy, label=0) for _, cx, cy in holes]
+
+
 def _build_cv_keyframe_mask_prompts(
     frame_paths: List[str],
     reference_full: np.ndarray,
@@ -410,8 +458,13 @@ def _build_cv_keyframe_mask_prompts(
     no_normalize: bool,
     min_area: int,
     threshold_offset: int,
+    opening_radius: int,
+    median_ksize: int,
     debug_dir: Optional[str],
     log_every: int,
+    neg_points_from_holes: bool = False,
+    min_hole_area: int = 4,
+    max_neg_points: int = 16,
 ) -> Tuple[PromptSpec, Optional[int], List[dict]]:
     if keyframe_interval <= 0:
         raise ValueError("--cv-keyframe-interval must be > 0")
@@ -426,6 +479,8 @@ def _build_cv_keyframe_mask_prompts(
     segment_cfg = SegmentationConfig(
         min_area=min_area,
         threshold_offset=threshold_offset,
+        opening_radius=opening_radius,
+        median_ksize=median_ksize,
     )
 
     prompts: List[ObjectPrompt] = []
@@ -531,11 +586,19 @@ def _build_cv_keyframe_mask_prompts(
             })
         else:
             prompt_idx = int(selected["prompt_idx"])
+            neg_points: List[PointPrompt] = []
+            if neg_points_from_holes:
+                neg_points = _negative_points_from_holes(
+                    selected["mask"],
+                    min_hole_area=min_hole_area,
+                    max_neg_points=max_neg_points,
+                )
             prompts.append(
                 ObjectPrompt(
                     object_id=1,
                     frame_idx=prompt_idx,
                     mask=selected["mask"],
+                    points=neg_points,
                 )
             )
             log_entry = {
@@ -544,6 +607,7 @@ def _build_cv_keyframe_mask_prompts(
                 "segment_end": int(selected["segment_end"]),
                 "area": int(selected["area"]),
                 "num_components": int(selected["num_components"]),
+                "num_neg_points": int(len(neg_points)),
                 "status": "ok",
             }
             if selected.get("debug_paths"):
@@ -561,6 +625,147 @@ def _build_cv_keyframe_mask_prompts(
     return PromptSpec(prompts=prompts), first_idx, logs
 
 
+def _build_cv_extra_keyframe_prompts(
+    frame_paths: List[str],
+    reference_full: np.ndarray,
+    roi: Optional[dict],
+    roi_mask: Optional[np.ndarray],
+    extra_indices: List[int],
+    preprocess_mode: str,
+    diff_sigma: float,
+    use_clahe: bool,
+    disable_light_map: bool,
+    no_normalize: bool,
+    min_area: int,
+    threshold_offset: int,
+    opening_radius: int,
+    median_ksize: int,
+    debug_dir: Optional[str],
+    neg_points_from_holes: bool = False,
+    min_hole_area: int = 4,
+    max_neg_points: int = 16,
+) -> Tuple[List[ObjectPrompt], List[dict]]:
+    """Build CV keyframe prompts at explicit frame indices (no within-window search)."""
+    preprocess_cfg = PreprocessConfig(
+        mode=preprocess_mode,
+        diff_sigma=diff_sigma,
+        use_clahe=use_clahe,
+    )
+    segment_cfg = SegmentationConfig(
+        min_area=min_area,
+        threshold_offset=threshold_offset,
+        opening_radius=opening_radius,
+        median_ksize=median_ksize,
+    )
+    debug_root = os.path.abspath(debug_dir) if debug_dir else None
+    if debug_root:
+        os.makedirs(debug_root, exist_ok=True)
+
+    out_prompts: List[ObjectPrompt] = []
+    out_logs: List[dict] = []
+    total = len(frame_paths)
+    for idx in extra_indices:
+        if idx < 0 or idx >= total:
+            out_logs.append({"extra_idx": int(idx), "status": "out_of_range"})
+            continue
+        frame_full = cv2.imread(frame_paths[idx])
+        if frame_full is None:
+            out_logs.append({"extra_idx": int(idx), "status": "frame_read_failed"})
+            continue
+        if frame_full.shape[:2] != reference_full.shape[:2]:
+            raise ValueError("Frame and reference image sizes do not match")
+        frame_crop, _ = _apply_roi(frame_full, roi)
+        ref_crop, _ = _apply_roi(reference_full, roi)
+
+        if no_normalize and (preprocess_mode or "default").lower() in {"default", "automatrix"}:
+            diff = frame_crop.astype(np.float32) - ref_crop.astype(np.float32)
+            if diff_sigma > 0:
+                diff = cv2.GaussianBlur(diff, (0, 0), sigmaX=diff_sigma, sigmaY=diff_sigma)
+            diff_gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+            gray = np.clip(diff_gray + 128.0, 0, 255).astype(np.uint8)
+            if use_clahe:
+                clahe = cv2.createCLAHE(
+                    clipLimit=preprocess_cfg.clahe_clip_limit,
+                    tileGridSize=preprocess_cfg.clahe_tile_grid,
+                )
+                gray = clahe.apply(gray)
+        elif disable_light_map and (preprocess_mode or "default").lower() in {"default", "automatrix"}:
+            debug = preprocess_frame_with_debug(frame_crop, ref_crop, preprocess_cfg)
+            adjusted = debug["adjusted"]
+            gray = cv2.cvtColor(adjusted, cv2.COLOR_BGR2GRAY) if adjusted.ndim == 3 else adjusted.astype(np.uint8)
+            if use_clahe:
+                clahe = cv2.createCLAHE(
+                    clipLimit=preprocess_cfg.clahe_clip_limit,
+                    tileGridSize=preprocess_cfg.clahe_tile_grid,
+                )
+                gray = clahe.apply(gray)
+        else:
+            gray = preprocess_frame(frame_crop, ref_crop, preprocess_cfg)
+
+        if (preprocess_mode or "default").lower() == "automatrix":
+            labels, components = segment_frame_automatrix(gray, segment_cfg)
+        else:
+            labels, components = segment_frame(gray, segment_cfg)
+        if not components:
+            out_logs.append({"extra_idx": int(idx), "status": "no_cv_mask"})
+            continue
+
+        mask_crop = labels > 0
+        if roi is None:
+            mask_full = mask_crop.astype(bool)
+        else:
+            mask_full = np.zeros(frame_full.shape[:2], dtype=bool)
+            x1, y1, x2, y2 = roi["x1"], roi["y1"], roi["x2"], roi["y2"]
+            mask_full[y1:y2, x1:x2] = mask_crop
+        if roi_mask is not None:
+            mask_full &= (roi_mask > 0)
+
+        area = int(mask_full.sum())
+        if area <= 0:
+            out_logs.append({"extra_idx": int(idx), "status": "empty_after_roi"})
+            continue
+
+        debug_paths = {}
+        if debug_root:
+            debug_paths = _save_cv_keyframe_debug_artifacts(
+                debug_dir=debug_root,
+                frame_full=frame_full,
+                preprocessed_gray=gray,
+                mask_full=mask_full,
+                base_idx=idx,
+                prompt_idx=idx,
+            )
+
+        neg_points: List[PointPrompt] = []
+        if neg_points_from_holes:
+            neg_points = _negative_points_from_holes(
+                mask_full,
+                min_hole_area=min_hole_area,
+                max_neg_points=max_neg_points,
+            )
+        out_prompts.append(
+            ObjectPrompt(
+                object_id=1,
+                frame_idx=int(idx),
+                mask=mask_full,
+                points=neg_points,
+            )
+        )
+        log_entry = {
+            "extra_idx": int(idx),
+            "prompt_idx": int(idx),
+            "area": int(area),
+            "num_components": int(len(components)),
+            "num_neg_points": int(len(neg_points)),
+            "status": "ok",
+        }
+        if debug_paths:
+            log_entry["debug"] = debug_paths
+        out_logs.append(log_entry)
+
+    return out_prompts, out_logs
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="SAM2 prompted flow tracking")
     parser.add_argument("--frames", required=True, help="Frames directory")
@@ -569,7 +774,15 @@ def main() -> None:
     parser.add_argument("--roi", default=None, help="ROI JSON path (x1,y1,x2,y2)")
     parser.add_argument("--roi-mask", default=None, help="ROI mask PNG (optional polygon mask)")
     parser.add_argument("--prompt-mode", choices=["classic", "sam2"], default="sam2")
-    parser.add_argument("--min-area", type=int, default=500, help="Min component area for classic prompt")
+    parser.add_argument(
+        "--sam2-tracking-min-area",
+        type=int,
+        default=None,
+        help="Min component area (px) applied to SAM2-propagated masks before tracking; "
+             "also used as the classic-prompt min component area. "
+             "Defaults to --cv-keyframe-min-area so the prompt-stage and tracking-stage "
+             "floors stay aligned unless explicitly overridden.",
+    )
     parser.add_argument("--fps", type=float, default=4.0, help="Frames per second")
     parser.add_argument("--mm-per-pixel", type=float, default=None, help="Scale in mm per pixel")
     parser.add_argument(
@@ -653,6 +866,12 @@ def main() -> None:
     parser.add_argument("--sam2-min-mask-scale", type=float, default=0.25, help="Minimum mask scale after OOM")
     parser.add_argument("--sam2-max-prompts", type=int, default=1, help="Max prompts to keep from search")
     parser.add_argument(
+        "--sam2-fill-hole-area",
+        type=int,
+        default=8,
+        help="SAM2 background-hole fill area in low-res masks (upstream default 8). Set to 0 to preserve genuine holes.",
+    )
+    parser.add_argument(
         "--cv-keyframe-prompts",
         action="store_true",
         help="Generate CV masks at keyframes and use them as SAM2 mask prompts in one run",
@@ -699,11 +918,62 @@ def main() -> None:
         help="Threshold offset for CV keyframe prompt segmentation",
     )
     parser.add_argument(
+        "--cv-keyframe-opening-radius",
+        type=int,
+        default=0,
+        help="Morphological opening radius (pixels) for CV keyframe prompt segmentation. 0 disables opening.",
+    )
+    parser.add_argument(
+        "--cv-keyframe-median-ksize",
+        type=int,
+        default=10,
+        help="Median smoothing kernel size for CV keyframe prompt segmentation (rounded up to odd). <=1 disables.",
+    )
+    parser.add_argument(
         "--cv-keyframe-debug-dir",
         default=None,
         help="Optional directory to save CV keyframe debug overlays/masks/preprocessed images",
     )
+    parser.add_argument(
+        "--cv-keyframe-neg-points-from-holes",
+        action="store_true",
+        help="Auto-place negative point prompts inside enclosed holes of each keyframe CV mask. "
+             "SAM2 uses the mask as seed (via prev_sam_mask_logits) and the points refine it, "
+             "so negatives suppress the propagator's tendency to fill holes.",
+    )
+    parser.add_argument(
+        "--cv-keyframe-min-hole-area",
+        type=int,
+        default=4,
+        help="Minimum enclosed-hole area (pixels, original resolution) to receive a negative point.",
+    )
+    parser.add_argument(
+        "--cv-keyframe-max-neg-points",
+        type=int,
+        default=16,
+        help="Cap on negative points per keyframe. Largest holes are kept first.",
+    )
+    parser.add_argument(
+        "--cv-keyframe-extra-indices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Extra frame indices to use as CV keyframe prompts in addition to the interval schedule.",
+    )
+    parser.add_argument(
+        "--sam2-offload-video-to-cpu",
+        action="store_true",
+        help="Keep frame tensors on CPU; swap to GPU per access. Saves GPU memory at small latency cost.",
+    )
+    parser.add_argument(
+        "--sam2-offload-state-to-cpu",
+        action="store_true",
+        help="Offload SAM2 inference state to CPU between frames. Saves more GPU memory; bigger latency cost.",
+    )
     args = parser.parse_args()
+
+    if args.sam2_tracking_min_area is None:
+        args.sam2_tracking_min_area = args.cv_keyframe_min_area
 
     if args.cv_keyframe_prompts and args.prompt_mode != "sam2":
         parser.error("--cv-keyframe-prompts requires --prompt-mode sam2")
@@ -758,9 +1028,43 @@ def main() -> None:
             no_normalize=args.cv_keyframe_no_normalize,
             min_area=args.cv_keyframe_min_area,
             threshold_offset=args.cv_keyframe_threshold_offset,
+            opening_radius=args.cv_keyframe_opening_radius,
+            median_ksize=args.cv_keyframe_median_ksize,
             debug_dir=args.cv_keyframe_debug_dir,
             log_every=args.log_every,
+            neg_points_from_holes=args.cv_keyframe_neg_points_from_holes,
+            min_hole_area=args.cv_keyframe_min_hole_area,
+            max_neg_points=args.cv_keyframe_max_neg_points,
         )
+        if args.cv_keyframe_extra_indices:
+            existing_idx = {int(p.frame_idx) for p in prompt_spec.prompts}
+            extras = [i for i in args.cv_keyframe_extra_indices if int(i) not in existing_idx]
+            extra_prompts, extra_logs = _build_cv_extra_keyframe_prompts(
+                frame_paths=frame_paths,
+                reference_full=reference_full,
+                roi=roi,
+                roi_mask=roi_mask,
+                extra_indices=extras,
+                preprocess_mode=args.cv_keyframe_preprocess_mode,
+                diff_sigma=args.cv_keyframe_diff_sigma,
+                use_clahe=args.cv_keyframe_use_clahe,
+                disable_light_map=args.cv_keyframe_disable_light_map,
+                no_normalize=args.cv_keyframe_no_normalize,
+                min_area=args.cv_keyframe_min_area,
+                threshold_offset=args.cv_keyframe_threshold_offset,
+                opening_radius=args.cv_keyframe_opening_radius,
+                median_ksize=args.cv_keyframe_median_ksize,
+                debug_dir=args.cv_keyframe_debug_dir,
+                neg_points_from_holes=args.cv_keyframe_neg_points_from_holes,
+                min_hole_area=args.cv_keyframe_min_hole_area,
+                max_neg_points=args.cv_keyframe_max_neg_points,
+            )
+            cv_keyframe_logs = list(cv_keyframe_logs) + extra_logs
+            merged = list(prompt_spec.prompts) + extra_prompts
+            merged.sort(key=lambda p: int(p.frame_idx))
+            prompt_spec = PromptSpec(prompts=merged)
+            if merged:
+                prompt_frame_idx = int(merged[0].frame_idx)
         masks_by_frame = _run_sam2_propagation(
             frames_dir=args.frames,
             prompts=prompt_spec,
@@ -768,6 +1072,9 @@ def main() -> None:
             checkpoint=args.sam2_checkpoint,
             model_cfg=args.sam2_model_cfg,
             device=args.sam2_device,
+            fill_hole_area=args.sam2_fill_hole_area,
+            offload_video_to_cpu=args.sam2_offload_video_to_cpu,
+            offload_state_to_cpu=args.sam2_offload_state_to_cpu,
         )
         _save_masks_for_frames(frame_paths, masks_by_frame, sam2_masks_dir)
         prompt_info = {
@@ -784,7 +1091,10 @@ def main() -> None:
             "no_normalize": bool(args.cv_keyframe_no_normalize),
             "min_area": int(args.cv_keyframe_min_area),
             "threshold_offset": int(args.cv_keyframe_threshold_offset),
+            "opening_radius": int(args.cv_keyframe_opening_radius),
+            "median_ksize": int(args.cv_keyframe_median_ksize),
             "debug_dir": os.path.abspath(args.cv_keyframe_debug_dir) if args.cv_keyframe_debug_dir else None,
+            "extra_indices": [int(i) for i in (args.cv_keyframe_extra_indices or [])],
         }
     else:
         if args.prompt_mode == "classic":
@@ -793,7 +1103,7 @@ def main() -> None:
                 reference_full=reference_full,
                 roi=roi,
                 roi_mask=roi_mask,
-                min_area=args.min_area,
+                min_area=args.sam2_tracking_min_area,
                 log_every=args.log_every,
             )
             prompt_spec = PromptSpec(prompts=[
@@ -830,6 +1140,9 @@ def main() -> None:
             checkpoint=args.sam2_checkpoint,
             model_cfg=args.sam2_model_cfg,
             device=args.sam2_device,
+            fill_hole_area=args.sam2_fill_hole_area,
+            offload_video_to_cpu=args.sam2_offload_video_to_cpu,
+            offload_state_to_cpu=args.sam2_offload_state_to_cpu,
         )
         _save_masks_for_frames(frame_paths, masks_by_frame, sam2_masks_dir)
 
@@ -878,6 +1191,8 @@ def main() -> None:
             "no_normalize": bool(args.cv_keyframe_no_normalize),
             "min_area": int(args.cv_keyframe_min_area),
             "threshold_offset": int(args.cv_keyframe_threshold_offset),
+            "opening_radius": int(args.cv_keyframe_opening_radius),
+            "median_ksize": int(args.cv_keyframe_median_ksize),
             "debug_dir": os.path.abspath(args.cv_keyframe_debug_dir) if args.cv_keyframe_debug_dir else None,
             "num_prompts": int(len(prompt_spec.prompts)) if args.cv_keyframe_prompts else 0,
             "keyframe_logs": cv_keyframe_logs if args.cv_keyframe_prompts else [],
@@ -918,7 +1233,7 @@ def main() -> None:
                 mode=args.preprocess_mode,
                 raw_sigma=args.preprocess_raw_sigma,
             ),
-            segment=SegmentationConfig(min_area=args.min_area),
+            segment=SegmentationConfig(min_area=args.sam2_tracking_min_area),
         )
         outputs = track_frames(
             frames_dir=args.frames,

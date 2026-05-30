@@ -110,6 +110,12 @@ def main():
     parser.add_argument("--max-area-ratio", type=float, default=0.5, help="Max mask area / ROI")
     parser.add_argument("--mask-scale", type=float, default=1.0, help="Scale for automask input")
     parser.add_argument("--max-prompts", type=int, default=1, help="Max prompts to keep")
+    parser.add_argument(
+        "--fill-hole-area",
+        type=int,
+        default=8,
+        help="SAM2 background-hole fill area in low-res masks (upstream default 8). Set to 0 to preserve genuine holes.",
+    )
     parser.add_argument("--prompts-out", type=str, default=None, help="Optional YAML path to save prompts")
     parser.add_argument("--event-min-area", type=int, default=25, help="Minimum connected-component area for split/merge analysis")
     parser.add_argument("--event-min-overlap-px", type=int, default=10, help="Minimum overlap pixels required to link components across frames")
@@ -212,6 +218,7 @@ def main():
         checkpoint_path=args.checkpoint,
         model_cfg=args.model_cfg,
         device=args.device,
+        fill_hole_area=args.fill_hole_area,
     )
     result, masks = runner.run(
         frames_dir=args.frames,
