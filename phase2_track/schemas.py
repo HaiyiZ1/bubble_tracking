@@ -21,6 +21,10 @@ CV_KEYFRAME_INTERVAL: int = 160
 CV_KEYFRAME_PREPROCESS_MODE: str = "default"
 CV_KEYFRAME_DIFF_SIGMA: float = 0.5
 CV_KEYFRAME_NORMALIZE_CONTRAST: bool = False  # matches --cv-keyframe-no-normalize
+# Historical default from original scripts/run_sam2_prompted_flow.py (was 25 before the
+# median_ksize default was lowered to 10 in flow_tracking.py). Matching the publishing
+# oracle runs requires 25 here.
+CV_KEYFRAME_MEDIAN_KSIZE: int = 25
 
 PREPROCESS_MODE: str = "raw"
 PREPROCESS_RAW_SIGMA: float = 1.0
