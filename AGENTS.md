@@ -11,8 +11,8 @@ Use `README.md` as the source of truth for runnable commands.
 ## What To Reproduce
 
 1. Environment setup and validation (venv + SAM2 + checkpoints).
-2. Phase 1 — Preprocessing: frame downscale, ROI capture/import, keyframe previews.
-3. Phase 2 — Tracking: SAM2 propagation with CV-keyframe prompts, optical-flow + linkage tracking, debounce.
+2. Phase 1 — Preprocessing: frame downscale, ROI capture/import, and CV-keyframe prompt building (writes `cv_keyframe_prompts/` + `cv_keyframe_debug/` to disk).
+3. Phase 2 — Tracking: reads CV-keyframe prompts from disk, runs SAM2 propagation + optical-flow + linkage tracking, debounce.
 4. Phase 3 — Postprocessing: velocity overlays, vanished-area plots, per-bubble metrics, publishing 1x/10x videos.
 
 ## Key Concepts
@@ -27,8 +27,8 @@ Use `README.md` as the source of truth for runnable commands.
 
 For each publishing case run (`outputs/case{1,2,3}_air1_publish/`), verify:
 - `run_config.json` at the root with `phase1_done`, `phase2_done`, `phase3_done` all true.
-- `phase1/`: `frames_0p5/`, `roi_0p5.json`, `roi_mask_0p5.png`, `keyframe_previews/`, `phase1_summary.json`.
-- `phase2/`: `sam2_masks/`, `masks/`, `tracks.csv`, `tracks.json`, `events.json`, `area_timeseries.csv/json`, `sam2_overlay.mp4`, `tracking_overlay.mp4`, `cv_keyframe_debug/`.
+- `phase1/`: `frames_0p5/`, `roi_0p5.json`, `roi_mask_0p5.png`, `cv_keyframe_prompts/`, `cv_keyframe_debug/`, `phase1_summary.json`.
+- `phase2/`: `sam2_masks/`, `masks/`, `tracks.csv`, `tracks.json`, `events.json`, `area_timeseries.csv/json`, `sam2_overlay.mp4`, `tracking_overlay.mp4`.
 - `phase3/`: `velocity_overlay.mp4`, `bubble_velocity_area_metrics.csv`, `bubble_max_velocity.csv`, `vanished_area_moving_window.csv`, the 8 vanished-area PNG variants, the velocity-area scatter PNGs, and `publishing_overlay/tracking_overlay_publish_{1x,10x}.mp4`.
 
 ## Scope Discipline

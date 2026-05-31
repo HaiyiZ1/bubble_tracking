@@ -77,7 +77,9 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
 ### Phase 1 — Preprocess
 
-Downscales frames, applies ROI, writes a preprocessed frame set into `<run-dir>/`.
+Downscales frames, applies ROI, and builds CV-keyframe prompts. Writes preprocessed frames, ROI files, and `cv_keyframe_prompts/` + `cv_keyframe_debug/` into `<run-dir>/phase1/`.
+
+**Phase 1 runs in seconds (no GPU).** Preview `phase1/cv_keyframe_debug/` images to verify keyframe quality before committing GPU time to Phase 2. Iterating on `--cv-keyframe-threshold-offset`, `--cv-keyframe-min-area`, or `--cv-keyframe-extra-indices` only requires re-running Phase 1.
 
 ```bash
 # Case 1 (High Porosity Air1)
@@ -85,28 +87,34 @@ python -m phase1_preprocess --case case1.air1 \
   --raw-frames data/bubbles/case1_air1_publish/frames \
   --run-dir outputs/case1_air1_publish \
   --roi-from data/interim/bubbles_air1_072_271/roi_0p5.json \
-  --roi-mask-from data/interim/bubbles_air1_072_271/roi_mask_0p5.png
+  --roi-mask-from data/interim/bubbles_air1_072_271/roi_mask_0p5.png \
+  --cv-keyframe-start-idx 10 \
+  --cv-keyframe-normalize-lightmap
 
 # Case 2 (Low Porosity Air1)
 python -m phase1_preprocess --case case2.air1 \
   --raw-frames data/bubbles/case2_air1_publish/frames \
   --run-dir outputs/case2_air1_publish \
   --roi-from data/interim/case2_air1/roi_0p5.json \
-  --roi-mask-from data/interim/case2_air1/roi_mask_0p5.png
+  --roi-mask-from data/interim/case2_air1/roi_mask_0p5.png \
+  --cv-keyframe-start-idx 2 \
+  --cv-keyframe-normalize-lightmap
 
 # Case 3 (Medium Porosity Air1)
 python -m phase1_preprocess --case case3.air1 \
   --raw-frames data/bubbles/case3_air1_publish/frames \
   --run-dir outputs/case3_air1_publish \
   --roi-from data/interim/case3_air1/roi_0p5.json \
-  --roi-mask-from data/interim/case3_air1/roi_mask_0p5.png
+  --roi-mask-from data/interim/case3_air1/roi_mask_0p5.png \
+  --cv-keyframe-start-idx 10 \
+  --cv-keyframe-normalize-lightmap
 ```
 
 To select ROI interactively (omit `--roi-from` / `--roi-mask-from`); the phase will open an interactive picker and save the results into the run directory.
 
 ### Phase 2 — Track
 
-Runs SAM2 + CV keyframe prompting. Writes `sam2_masks/`, `tracks.csv`, `events.json` into `<run-dir>/`.
+Reads CV-keyframe prompts written by Phase 1, runs SAM2 propagation and flow tracking. Writes `sam2_masks/`, `tracks.csv`, `events.json` into `<run-dir>/phase2/`.
 
 Set determinism env vars before running (see Determinism section above), or prefix inline:
 
@@ -115,22 +123,18 @@ Set determinism env vars before running (see Determinism section above), or pref
 PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m phase2_track \
   --run-dir outputs/case1_air1_publish \
   --sam2-model tiny \
-  --cv-keyframe-start-idx 10 \
-  --cv-keyframe-normalize-lightmap \
   --no-sam2-offload-video-to-cpu
 
 # Case 2 (Low Porosity Air1)
 PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m phase2_track \
   --run-dir outputs/case2_air1_publish \
   --sam2-model base_plus \
-  --cv-keyframe-start-idx 2 \
   --no-sam2-offload-video-to-cpu
 
 # Case 3 (Medium Porosity Air1)
 PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m phase2_track \
   --run-dir outputs/case3_air1_publish \
   --sam2-model base_plus \
-  --cv-keyframe-start-idx 10 \
   --no-sam2-offload-video-to-cpu
 ```
 
@@ -156,14 +160,14 @@ python -m phase3_postprocess --run-dir outputs/case3_air1_publish
 | 1 | `--meta` | meta.yaml path (default `./meta.yaml`) |
 | 1 | `--downscale` | Resize factor; default 0.5 |
 | 1 | `--roi-from`, `--roi-mask-from` | Skip interactive ROI selection by importing existing files |
+| 1 | `--cv-keyframe-start-idx` | First keyframe index (1-based, relabeled) |
+| 1 | `--cv-keyframe-threshold-offset` | CV threshold offset; default 7 |
+| 1 | `--cv-keyframe-min-area` | Min connected-component area in CV keyframe prompt; default 50 |
+| 1 | `--cv-keyframe-normalize-lightmap` | Enable light-map normalization (default off; pass to match historical case1/2/3 outputs) |
+| 1 | `--cv-keyframe-extra-indices` | Additional manual keyframes alongside the regular interval |
 | 2 | `--run-dir` | Run directory from Phase 1 |
 | 2 | `--sam2-model` | One of `tiny`, `small`, `base_plus`, `large` |
-| 2 | `--cv-keyframe-start-idx` | First keyframe index (1-based, relabeled) |
 | 2 | `--device` | `cuda` / `cpu`; auto-detect default |
 | 2 | `--no-sam2-offload-video-to-cpu` | Disable CPU offload (default: on for OOM safety) |
-| 2 | `--cv-keyframe-extra-indices` | Additional manual keyframes alongside the regular interval |
-| 2 | `--cv-keyframe-threshold-offset` | CV threshold offset; default 7 |
-| 2 | `--cv-keyframe-min-area` | Min connected-component area in CV keyframe prompt; default 50 |
-| 2 | `--cv-keyframe-normalize-lightmap` | Enable light-map normalization (default off; pass to match historical case1/2/3 outputs) |
 | 3 | `--run-dir` | Run directory from Phase 2 |
 | 3 | `--v-ref-1`, `--v-ref-2` | Reference velocities for normalization (defaults 0.23, 7.0) |
