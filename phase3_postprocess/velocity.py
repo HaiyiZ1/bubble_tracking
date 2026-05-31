@@ -334,14 +334,15 @@ def write_velocity_overlay_video(
 
 
 def _load_run_config_optional(run_dir: Path) -> dict:
-    """Load sam2_prompted_flow_config.json; return {} if missing."""
-    config_path = run_dir / "sam2_prompted_flow_config.json"
-    if not config_path.exists():
-        return {}
-    try:
-        return json.loads(config_path.read_text())
-    except Exception:
-        return {}
+    """Load run config; tries new run_config.json first, then legacy sam2_prompted_flow_config.json."""
+    for name in ("run_config.json", "sam2_prompted_flow_config.json"):
+        p = run_dir / name
+        if p.exists():
+            try:
+                return json.loads(p.read_text())
+            except Exception:
+                continue
+    return {}
 
 
 def _resolve_roi_area(
@@ -1098,11 +1099,21 @@ def write_max_velocity_summary(
     config = _load_run_config_optional(run_dir)
     if not config:
         raise FileNotFoundError(
-            f"sam2_prompted_flow_config.json not found under {run_dir}"
+            f"run_config.json (or legacy sam2_prompted_flow_config.json) not found under {run_dir}"
         )
     tracking_cfg = config.get("tracking", {})
-    fps = float(tracking_cfg.get("fps", 4.0))
-    mm_per_pixel = float(tracking_cfg["mm_per_pixel"])
+    # fps/mm_per_pixel live under tracking.* in the legacy config and at
+    # the top level in the new run_config.json (phase1 writes them flat).
+    fps = float(tracking_cfg.get("fps", config.get("fps", 4.0)))
+    if "mm_per_pixel" in tracking_cfg:
+        mm_per_pixel = float(tracking_cfg["mm_per_pixel"])
+    elif "mm_per_pixel" in config:
+        mm_per_pixel = float(config["mm_per_pixel"])
+    else:
+        raise KeyError(
+            f"mm_per_pixel not found in run config at {run_dir} "
+            "(tried tracking.mm_per_pixel and top-level mm_per_pixel)"
+        )
 
     by_object = _load_tracks_by_object(tracks_csv)
     lineage_by_object = _load_lineage(tracks_json)

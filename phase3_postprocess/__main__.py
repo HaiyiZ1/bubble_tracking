@@ -42,8 +42,11 @@ def main() -> None:
     phase3_dir.mkdir(parents=True, exist_ok=True)
 
     write_velocity_overlay_video(
-        run_dir=args.run_dir, output=phase3_dir / "velocity_overlay.mp4",
-        fps=cfg.fps, label_units="mm_s",
+        run_dir=args.run_dir,
+        frames_dir=Path(cfg.frames),
+        output=phase3_dir / "velocity_overlay.mp4",
+        fps=cfg.fps,
+        label_units="mm_s",
     )
     write_velocity_metrics_csv(
         run_dir=args.run_dir, output_dir=phase3_dir,
