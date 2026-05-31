@@ -27,6 +27,7 @@ from .schemas import (
     CV_KEYFRAME_PREPROCESS_MODE,
     CV_KEYFRAME_DIFF_SIGMA,
     CV_KEYFRAME_NORMALIZE_CONTRAST,
+    CV_KEYFRAME_MEDIAN_KSIZE,
     PREPROCESS_MODE,
     PREPROCESS_RAW_SIGMA,
     DEBOUNCE_BIRTH_FRAMES,
@@ -90,6 +91,20 @@ def main() -> None:
     from .schemas import PromptSpec
 
     args = _parse()
+
+    # --- Determinism: make SAM2 + torch reproducible across runs. ---
+    # Without these, GPU SAM2 propagation drifts between identical-input runs.
+    # cuDNN deterministic + fixed seeds is the minimum cost / max ROI combo;
+    # we don't enable `torch.use_deterministic_algorithms(True)` because it
+    # raises if any op lacks a deterministic impl (interpolation, scatter, etc.).
+    import os as _os
+    import torch as _torch
+    _os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    _os.environ.setdefault("PYTHONHASHSEED", "0")
+    _torch.manual_seed(0)
+    _torch.cuda.manual_seed_all(0)
+    _torch.backends.cudnn.deterministic = True
+    _torch.backends.cudnn.benchmark = False
 
     # --- Load phase1 run config ---
     cfg = load_run_config(args.run_dir)
@@ -160,7 +175,7 @@ def main() -> None:
         min_area=args.cv_keyframe_min_area,
         threshold_offset=args.cv_keyframe_threshold_offset,
         opening_radius=0,
-        median_ksize=10,
+        median_ksize=CV_KEYFRAME_MEDIAN_KSIZE,
         debug_dir=cv_keyframe_debug_dir,
         log_every=10,
     )
@@ -184,7 +199,7 @@ def main() -> None:
                 min_area=args.cv_keyframe_min_area,
                 threshold_offset=args.cv_keyframe_threshold_offset,
                 opening_radius=0,
-                median_ksize=10,
+                median_ksize=CV_KEYFRAME_MEDIAN_KSIZE,
                 debug_dir=cv_keyframe_debug_dir,
             )
             cv_keyframe_logs = list(cv_keyframe_logs) + extra_logs
@@ -215,9 +230,24 @@ def main() -> None:
     )
 
     # Save SAM2 masks to disk.
+    # masks_by_frame uses 0-based SAM2 internal indices; remap to the
+    # actual 1-based filename numbers from frame_paths (matching the oracle's
+    # _save_masks_for_frames logic in scripts/run_sam2_prompted_flow.py).
+    # Frames not reached by propagation receive an empty (all-zero) mask so
+    # that track_frames sees a complete, contiguous set of mask files.
     Path(sam2_masks_dir).mkdir(parents=True, exist_ok=True)
-    for frame_idx, mask in masks_by_frame.items():
-        save_mask(mask, Path(sam2_masks_dir) / f"{frame_idx:06d}.png")
+    first_frame_img = cv2.imread(frame_paths[0])
+    if first_frame_img is None:
+        sys.exit(f"Failed to read first frame for empty-mask shape: {frame_paths[0]}")
+    import numpy as _np
+    empty_mask = _np.zeros(first_frame_img.shape[:2], dtype=_np.uint16)
+    import re as _re
+    _frame_num_re = _re.compile(r"(\d+)\.(jpg|jpeg|png)$", _re.IGNORECASE)
+    for sam2_idx, fp in enumerate(frame_paths):
+        m = _frame_num_re.search(fp)
+        file_num = int(m.group(1)) if m else (sam2_idx + 1)
+        mask = masks_by_frame.get(sam2_idx, empty_mask)
+        save_mask(mask, Path(sam2_masks_dir) / f"{file_num:06d}.png")
     print(f"[phase2] SAM2 masks saved to {sam2_masks_dir}")
 
     # --- Step 5: Run tracking ---
@@ -297,6 +327,7 @@ def main() -> None:
             "no_normalize": not CV_KEYFRAME_NORMALIZE_CONTRAST,
             "min_area": args.cv_keyframe_min_area,
             "threshold_offset": args.cv_keyframe_threshold_offset,
+            "median_ksize": CV_KEYFRAME_MEDIAN_KSIZE,
             "extra_indices": [int(i) for i in (args.cv_keyframe_extra_indices or [])],
             "num_prompts": len(prompt_spec.prompts),
             "keyframe_logs": cv_keyframe_logs,
