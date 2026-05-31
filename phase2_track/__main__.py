@@ -4,13 +4,8 @@ Usage:
     python -m phase2_track \\
         --run-dir outputs/case1_air1_publish \\
         --sam2-model {tiny,small,base_plus,large} \\
-        --cv-keyframe-start-idx 10 \\
         [--device cuda] \\
-        [--no-sam2-offload-video-to-cpu] \\
-        [--cv-keyframe-extra-indices N [N ...]] \\
-        [--cv-keyframe-threshold-offset 7] \\
-        [--cv-keyframe-min-area 50] \\
-        [--cv-keyframe-normalize-lightmap]
+        [--no-sam2-offload-video-to-cpu]
 """
 
 from __future__ import annotations
@@ -21,13 +16,9 @@ import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from .schemas import (
-    CV_KEYFRAME_INTERVAL,
-    CV_KEYFRAME_PREPROCESS_MODE,
-    CV_KEYFRAME_DIFF_SIGMA,
-    CV_KEYFRAME_NORMALIZE_CONTRAST,
-    CV_KEYFRAME_MEDIAN_KSIZE,
     PREPROCESS_MODE,
     PREPROCESS_RAW_SIGMA,
     DEBOUNCE_BIRTH_FRAMES,
@@ -40,6 +31,9 @@ from bubble_common.schemas import (
     SegmentationConfig,
     DebounceConfig,
     TrackingConfig,
+    ObjectPrompt,
+    PointPrompt,
+    PromptSpec,
 )
 
 # Video FPS for output overlays (not a user-facing flag in v1).
@@ -50,7 +44,6 @@ def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser("phase2_track")
     p.add_argument("--run-dir", required=True, type=Path)
     p.add_argument("--sam2-model", required=True, choices=tuple(SAM2_MODELS))
-    p.add_argument("--cv-keyframe-start-idx", required=True, type=int)
     p.add_argument("--device", default=None, help="cuda | cpu (auto-detect by default)")
 
     # offload defaults True; --no-sam2-offload-video-to-cpu disables.
@@ -62,15 +55,43 @@ def _parse() -> argparse.Namespace:
         "--no-sam2-offload-video-to-cpu", dest="sam2_offload_video_to_cpu",
         action="store_false",
     )
-
-    p.add_argument("--cv-keyframe-extra-indices", type=int, nargs="+", default=None)
-    p.add_argument("--cv-keyframe-threshold-offset", type=int, default=7)
-    p.add_argument("--cv-keyframe-min-area", type=int, default=50)
-    p.add_argument(
-        "--cv-keyframe-normalize-lightmap", dest="cv_keyframe_normalize_lightmap",
-        action="store_true", default=False,
-    )
     return p.parse_args()
+
+
+def _load_cv_keyframe_prompts(phase1_dir: Path) -> tuple:
+    """Read cv_keyframe_prompts/ written by phase1.
+
+    Returns (PromptSpec, list_of_keyframe_frame_indices).
+    """
+    prompts_dir = phase1_dir / "cv_keyframe_prompts"
+    if not prompts_dir.exists():
+        raise FileNotFoundError(
+            f"{prompts_dir} not found. Run phase1 with --cv-keyframe-start-idx first."
+        )
+    meta = json.loads((prompts_dir / "prompts.json").read_text())
+    prompts = []
+    keyframe_frame_indices = []
+    for kf in meta["keyframes"]:
+        frame_idx = int(kf["frame_idx"])
+        keyframe_frame_indices.append(frame_idx)
+        mask_png = prompts_dir / f"{frame_idx:06d}.png"
+        instance_mask = cv2.imread(str(mask_png), cv2.IMREAD_UNCHANGED)
+        if instance_mask is None:
+            raise ValueError(f"Failed to read {mask_png}")
+        for obj in kf["objects"]:
+            object_id = int(obj["object_id"])
+            obj_mask = (instance_mask == object_id).astype(np.uint8)
+            negative_points = [
+                PointPrompt(x=float(x), y=float(y), label=0)
+                for x, y in obj.get("negative_points", [])
+            ]
+            prompts.append(ObjectPrompt(
+                object_id=object_id,
+                frame_idx=frame_idx,
+                mask=obj_mask,
+                points=negative_points if negative_points else [],
+            ))
+    return PromptSpec(prompts=prompts), keyframe_frame_indices
 
 
 def main() -> None:
@@ -82,13 +103,10 @@ def main() -> None:
         SAM2Runner,
         sorted_frame_paths,
         save_mask,
-        _build_cv_keyframe_mask_prompts,
-        _build_cv_extra_keyframe_prompts,
     )
     from .flow import track_frames, load_roi_json
     from .events import save_area_timeseries_csv, save_tracks
     from .visualize import create_tracking_video, create_sam2_overlay_video
-    from .schemas import PromptSpec
 
     args = _parse()
 
@@ -116,6 +134,11 @@ def main() -> None:
     cfg = load_run_config(args.run_dir)
     if not cfg.phase1_done:
         sys.exit(f"{args.run_dir}/run_config.json: phase1_done=False. Run phase1 first.")
+    if cfg.cv_keyframes is None:
+        sys.exit(
+            f"{args.run_dir}/run_config.json: cv_keyframes is missing. "
+            "Re-run phase1 with --cv-keyframe-start-idx to build CV-keyframe prompts."
+        )
 
     phase2_dir = args.run_dir / "phase2"
     phase2_dir.mkdir(parents=True, exist_ok=True)
@@ -159,63 +182,11 @@ def main() -> None:
     ckpt, model_cfg_name = SAM2_MODELS[args.sam2_model]
     sam2_masks_dir = str(phase2_dir / "sam2_masks")
 
-    # --- Step 3: Build CV-keyframe prompts ---
-    cv_keyframe_debug_dir = str(phase2_dir / "cv_keyframe_debug")
-
-    print(
-        f"[phase2] Building CV-keyframe prompts "
-        f"(start_idx={args.cv_keyframe_start_idx}, interval={CV_KEYFRAME_INTERVAL}) ..."
-    )
-    prompt_spec, prompt_frame_idx, cv_keyframe_logs = _build_cv_keyframe_mask_prompts(
-        frame_paths=frame_paths,
-        reference_full=reference_full,
-        roi=roi,
-        roi_mask=roi_mask,
-        keyframe_interval=CV_KEYFRAME_INTERVAL,
-        keyframe_start_idx=args.cv_keyframe_start_idx,
-        preprocess_mode=CV_KEYFRAME_PREPROCESS_MODE,
-        diff_sigma=CV_KEYFRAME_DIFF_SIGMA,
-        use_clahe=False,
-        normalize_lightmap=args.cv_keyframe_normalize_lightmap,
-        no_normalize=not CV_KEYFRAME_NORMALIZE_CONTRAST,
-        min_area=args.cv_keyframe_min_area,
-        threshold_offset=args.cv_keyframe_threshold_offset,
-        opening_radius=0,
-        median_ksize=CV_KEYFRAME_MEDIAN_KSIZE,
-        debug_dir=cv_keyframe_debug_dir,
-        log_every=10,
-    )
-
-    # Merge any extra keyframe indices.
-    if args.cv_keyframe_extra_indices:
-        existing_idx = {int(p.frame_idx) for p in prompt_spec.prompts}
-        extras = [i for i in args.cv_keyframe_extra_indices if int(i) not in existing_idx]
-        if extras:
-            extra_prompts, extra_logs = _build_cv_extra_keyframe_prompts(
-                frame_paths=frame_paths,
-                reference_full=reference_full,
-                roi=roi,
-                roi_mask=roi_mask,
-                extra_indices=extras,
-                preprocess_mode=CV_KEYFRAME_PREPROCESS_MODE,
-                diff_sigma=CV_KEYFRAME_DIFF_SIGMA,
-                use_clahe=False,
-                normalize_lightmap=args.cv_keyframe_normalize_lightmap,
-                no_normalize=not CV_KEYFRAME_NORMALIZE_CONTRAST,
-                min_area=args.cv_keyframe_min_area,
-                threshold_offset=args.cv_keyframe_threshold_offset,
-                opening_radius=0,
-                median_ksize=CV_KEYFRAME_MEDIAN_KSIZE,
-                debug_dir=cv_keyframe_debug_dir,
-            )
-            cv_keyframe_logs = list(cv_keyframe_logs) + extra_logs
-            merged = list(prompt_spec.prompts) + extra_prompts
-            merged.sort(key=lambda p: int(p.frame_idx))
-            prompt_spec = PromptSpec(prompts=merged)
-            if merged:
-                prompt_frame_idx = int(merged[0].frame_idx)
-
-    print(f"[phase2] {len(prompt_spec.prompts)} CV-keyframe prompts built.")
+    # --- Step 3: Load CV-keyframe prompts from disk (built by phase1) ---
+    phase1_dir = args.run_dir / "phase1"
+    print(f"[phase2] Loading CV-keyframe prompts from {phase1_dir / 'cv_keyframe_prompts'} ...")
+    prompt_spec, keyframe_frame_indices = _load_cv_keyframe_prompts(phase1_dir)
+    print(f"[phase2] {len(prompt_spec.prompts)} CV-keyframe prompts loaded.")
 
     # --- Step 4: Run SAM2 propagation -> phase2_dir/sam2_masks/ ---
     print(f"[phase2] Running SAM2 propagation (model={args.sam2_model}) ...")
@@ -272,7 +243,7 @@ def main() -> None:
             mode=PREPROCESS_MODE,
             raw_sigma=PREPROCESS_RAW_SIGMA,
         ),
-        segment=SegmentationConfig(min_area=args.cv_keyframe_min_area),
+        segment=SegmentationConfig(min_area=cfg.cv_keyframes.get("min_area", 50)),
     )
     outputs = track_frames(
         frames_dir=frames_dir,
@@ -324,19 +295,9 @@ def main() -> None:
         "sam2_fill_hole_area": SAM2_FILL_HOLE_AREA,
         "sam2_offload_video_to_cpu": args.sam2_offload_video_to_cpu,
         "cv_keyframe": {
-            "interval": CV_KEYFRAME_INTERVAL,
-            "start_idx": args.cv_keyframe_start_idx,
-            "preprocess_mode": CV_KEYFRAME_PREPROCESS_MODE,
-            "diff_sigma": CV_KEYFRAME_DIFF_SIGMA,
-            "normalize_contrast": CV_KEYFRAME_NORMALIZE_CONTRAST,
-            "normalize_lightmap": args.cv_keyframe_normalize_lightmap,
-            "no_normalize": not CV_KEYFRAME_NORMALIZE_CONTRAST,
-            "min_area": args.cv_keyframe_min_area,
-            "threshold_offset": args.cv_keyframe_threshold_offset,
-            "median_ksize": CV_KEYFRAME_MEDIAN_KSIZE,
-            "extra_indices": [int(i) for i in (args.cv_keyframe_extra_indices or [])],
             "num_prompts": len(prompt_spec.prompts),
-            "keyframe_logs": cv_keyframe_logs,
+            "keyframe_frame_indices": keyframe_frame_indices,
+            "phase1_config": cfg.cv_keyframes,
         },
         "tracking": {
             "fps": fps,

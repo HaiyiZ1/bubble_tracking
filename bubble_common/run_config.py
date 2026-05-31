@@ -32,6 +32,8 @@ class RunConfig:
     phase1_done: bool = False
     phase2_done: bool = False
     phase3_done: bool = False
+    # Set by phase1 if the cv-keyframe step ran; None for old run_config.json files.
+    cv_keyframes: Optional[dict] = None
 
     def path(self) -> Path:
         return Path(self.run_dir) / "run_config.json"
@@ -49,6 +51,8 @@ def load(run_dir: str | Path) -> RunConfig:
             f"{p} not found. Run `python -m phase1_preprocess` first."
         )
     data = json.loads(p.read_text())
+    # Tolerate old run_config.json files that predate the cv_keyframes field.
+    data.setdefault("cv_keyframes", None)
     return RunConfig(**data)
 
 

@@ -5,6 +5,8 @@ at the top of src/bubble_tracking/flow_tracking.py.
 
 Stage 3 of phase-boundary refactor: dataclass definitions moved to
 bubble_common/schemas.py; re-exported here for back-compat.
+
+Stage 5+6: CV_KEYFRAME_* constants moved to phase1_preprocess/cv_keyframes.py.
 """
 
 from __future__ import annotations
@@ -17,15 +19,6 @@ from typing import Dict, Tuple
 # Values that are identical across case1/2/3 publishing runs and not exposed
 # as CLI flags in v1. v2 may promote a subset back to flags.
 # ---------------------------------------------------------------------------
-
-CV_KEYFRAME_INTERVAL: int = 160
-CV_KEYFRAME_PREPROCESS_MODE: str = "default"
-CV_KEYFRAME_DIFF_SIGMA: float = 0.5
-CV_KEYFRAME_NORMALIZE_CONTRAST: bool = False  # matches --cv-keyframe-no-normalize
-# Historical default from original scripts/run_sam2_prompted_flow.py (was 25 before the
-# median_ksize default was lowered to 10 in flow_tracking.py). Matching the publishing
-# oracle runs requires 25 here.
-CV_KEYFRAME_MEDIAN_KSIZE: int = 25
 
 PREPROCESS_MODE: str = "raw"
 PREPROCESS_RAW_SIGMA: float = 1.0
@@ -61,9 +54,7 @@ from bubble_common.schemas import (
 
 __all__ = [
     # Constants
-    "CV_KEYFRAME_INTERVAL", "CV_KEYFRAME_PREPROCESS_MODE",
-    "CV_KEYFRAME_DIFF_SIGMA", "CV_KEYFRAME_NORMALIZE_CONTRAST",
-    "CV_KEYFRAME_MEDIAN_KSIZE", "PREPROCESS_MODE", "PREPROCESS_RAW_SIGMA",
+    "PREPROCESS_MODE", "PREPROCESS_RAW_SIGMA",
     "VELOCITY_MODE", "USE_FLOW", "FLOW_BACKEND",
     "DEBOUNCE_BIRTH_FRAMES", "DEBOUNCE_DEATH_FRAMES",
     "SAM2_FILL_HOLE_AREA", "SAM2_MODELS",

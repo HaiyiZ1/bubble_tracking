@@ -6,7 +6,12 @@ Usage:
         --raw-frames data/bubbles/case1_air1_publish/frames \\
         --run-dir outputs/case1_air1_publish \\
         [--meta meta.yaml] [--downscale 0.5] \\
-        [--roi-from <path>] [--roi-mask-from <path>]
+        [--roi-from <path>] [--roi-mask-from <path>] \\
+        --cv-keyframe-start-idx 10 \\
+        [--cv-keyframe-threshold-offset 7] \\
+        [--cv-keyframe-min-area 50] \\
+        [--cv-keyframe-normalize-lightmap] \\
+        [--cv-keyframe-extra-indices N [N ...]]
 """
 
 from __future__ import annotations
@@ -21,8 +26,8 @@ import cv2
 from .frame_prep import prepare
 from .meta import load_case
 from .roi import import_roi, interactive_select
-from .visualize import DEFAULT_KEYFRAME_INTERVAL, keyframe_indices_for, render_previews
-from bubble_common.schemas import PreprocessConfig
+from .cv_keyframes import build_cv_keyframes
+from bubble_common.io import sorted_frame_paths
 from bubble_common.run_config import RunConfig
 
 
@@ -35,14 +40,15 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--downscale", type=float, default=0.5)
     p.add_argument("--roi-from", type=Path, default=None)
     p.add_argument("--roi-mask-from", type=Path, default=None)
+    # CV-keyframe flags
+    p.add_argument("--cv-keyframe-start-idx", required=True, type=int)
+    p.add_argument("--cv-keyframe-threshold-offset", type=int, default=7)
+    p.add_argument("--cv-keyframe-min-area", type=int, default=50)
     p.add_argument(
-        "--keyframe-interval", type=int, default=DEFAULT_KEYFRAME_INTERVAL,
-        help="Spacing of preview keyframes (matches phase2 CV_KEYFRAME_INTERVAL).",
+        "--cv-keyframe-normalize-lightmap", dest="cv_keyframe_normalize_lightmap",
+        action="store_true", default=False,
     )
-    p.add_argument(
-        "--keyframe-start", type=int, default=1,
-        help="First preview keyframe index (1-based on relabeled frames).",
-    )
+    p.add_argument("--cv-keyframe-extra-indices", nargs="+", type=int, default=None)
     return p.parse_args()
 
 
@@ -75,25 +81,39 @@ def main() -> None:
     if roi_mask is None:
         sys.exit(f"Could not read ROI mask {roi_mask_path}")
 
-    # Keyframe previews. The default (light-map ON, contrast normalize per
-    # flow_tracking defaults) matches the historical preprocess_frame
-    # configuration; reviewers care about what the segmentation sees, so
-    # use cfg.mode="default" rather than the lightweight "raw" mode.
-    cfg = PreprocessConfig(mode="default")
-    indices = keyframe_indices_for(
-        prepared.n_frames,
-        interval=args.keyframe_interval,
-        start=args.keyframe_start,
-    )
-    written = render_previews(
-        frames_dir=frames_out,
-        reference_path=frames_out / "000001.jpg",
+    # Load reference frame (first frame in the output directory).
+    reference_path = frames_out / "000001.jpg"
+    reference_full = cv2.imread(str(reference_path))
+    if reference_full is None:
+        sys.exit(f"Could not read reference frame {reference_path}")
+
+    # Load sorted frame paths for the CV-keyframe builder.
+    frame_paths = sorted_frame_paths(str(frames_out))
+    if not frame_paths:
+        sys.exit(f"No frames found in {frames_out}")
+
+    # --- CV-keyframe prompts ---
+    cv_summary = build_cv_keyframes(
+        frame_paths=frame_paths,
+        reference_full=reference_full,
         roi=roi,
         roi_mask=roi_mask,
-        out_dir=phase1_dir / "keyframe_previews",
-        cfg=cfg,
-        keyframe_indices=indices,
+        out_prompts_dir=phase1_dir / "cv_keyframe_prompts",
+        out_debug_dir=phase1_dir / "cv_keyframe_debug",
+        start_idx=args.cv_keyframe_start_idx,
+        threshold_offset=args.cv_keyframe_threshold_offset,
+        min_area=args.cv_keyframe_min_area,
+        normalize_lightmap=args.cv_keyframe_normalize_lightmap,
+        extra_indices=args.cv_keyframe_extra_indices,
     )
+
+    cv_keyframes_config = {
+        "start_idx": args.cv_keyframe_start_idx,
+        "threshold_offset": args.cv_keyframe_threshold_offset,
+        "min_area": args.cv_keyframe_min_area,
+        "normalize_lightmap": args.cv_keyframe_normalize_lightmap,
+        "extra_indices": [int(i) for i in (args.cv_keyframe_extra_indices or [])],
+    }
 
     summary = {
         "n_frames": prepared.n_frames,
@@ -103,8 +123,7 @@ def main() -> None:
         "fps": case_spec.fps,
         "case": args.case,
         "start_frame_meta": case_spec.start_frame,
-        "n_preview_keyframes": len(indices),
-        "n_preview_pngs_written": len(written),
+        "cv_keyframes": cv_summary,
     }
     (phase1_dir / "phase1_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
@@ -118,10 +137,11 @@ def main() -> None:
         start_frame=case_spec.start_frame,
         relabel_skipped=prepared.relabel_skipped,
         frames=str(frames_out),
-        reference=str(frames_out / "000001.jpg"),
+        reference=str(reference_path),
         roi_json=str(roi_json_path),
         roi_mask=str(roi_mask_path),
         phase1_done=True,
+        cv_keyframes=cv_keyframes_config,
     )
     cfg_out.write()
 
