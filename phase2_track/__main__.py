@@ -223,7 +223,7 @@ def main() -> None:
         checkpoint_path=ckpt,
         model_cfg=model_cfg_name,
         device=args.device if args.device is not None else (
-            "cuda"
+            "cuda" if _torch.cuda.is_available() else "cpu"
         ),
         fill_hole_area=SAM2_FILL_HOLE_AREA,
         offload_video_to_cpu=args.sam2_offload_video_to_cpu,
