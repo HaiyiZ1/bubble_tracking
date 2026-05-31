@@ -92,15 +92,21 @@ def main() -> None:
 
     args = _parse()
 
-    # --- Determinism: make SAM2 + torch reproducible across runs. ---
-    # Without these, GPU SAM2 propagation drifts between identical-input runs.
-    # cuDNN deterministic + fixed seeds is the minimum cost / max ROI combo;
-    # we don't enable `torch.use_deterministic_algorithms(True)` because it
-    # raises if any op lacks a deterministic impl (interpolation, scatter, etc.).
+    # --- Determinism: make SAM2 + cv2 + numpy reproducible across runs. ---
+    # Without these, GPU SAM2 propagation drifts between identical-input runs
+    # (cuDNN/cuBLAS heuristics), and multi-threaded OpenCV optical-flow can
+    # produce slightly different results in track_frames.
+    # NOTE: PYTHONHASHSEED must be set in the calling shell environment
+    # (CUBLAS_WORKSPACE_CONFIG too), not here — Python reads them at startup
+    # before main() runs. We set them anyway as a safety net for child procs.
     import os as _os
+    import cv2 as _cv2
+    import numpy as _np
     import torch as _torch
     _os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     _os.environ.setdefault("PYTHONHASHSEED", "0")
+    _cv2.setNumThreads(1)
+    _np.random.seed(0)
     _torch.manual_seed(0)
     _torch.cuda.manual_seed_all(0)
     _torch.backends.cudnn.deterministic = True
