@@ -357,10 +357,19 @@ def _resolve_roi_area(
         roi_mask_path = config.get("roi_mask")
         roi_json_path = config.get("roi_json")
 
+    def _resolve_run_relative(raw: str) -> Path:
+        # Run config paths can be:
+        # - absolute (use as-is)
+        # - project-relative (e.g. "outputs/case1/phase1/roi.json" — already includes run_dir prefix)
+        # - run-dir-relative (e.g. "phase1/roi.json")
+        # Try as-is first; if that exists, use it. Otherwise, join with run_dir.
+        p = Path(raw)
+        if p.is_absolute() or p.exists():
+            return p
+        return (run_dir / p).resolve()
+
     if roi_mask_path:
-        p = Path(roi_mask_path)
-        if not p.is_absolute():
-            p = (run_dir / p).resolve()
+        p = _resolve_run_relative(roi_mask_path)
         if p.exists():
             mask = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
             if mask is not None:
@@ -369,9 +378,7 @@ def _resolve_roi_area(
                     return float(area)
 
     if roi_json_path:
-        p = Path(roi_json_path)
-        if not p.is_absolute():
-            p = (run_dir / p).resolve()
+        p = _resolve_run_relative(roi_json_path)
         if p.exists():
             data = json.loads(p.read_text())
             if all(k in data for k in ("x1", "y1", "x2", "y2")):
