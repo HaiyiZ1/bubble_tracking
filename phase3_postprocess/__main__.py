@@ -30,8 +30,7 @@ def _parse() -> argparse.Namespace:
 
 
 def main() -> None:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from phase1_preprocess.run_config import load as load_run_config, mark_phase_done
+    from bubble_common.run_config import load as load_run_config, mark_phase_done
 
     args = _parse()
     cfg = load_run_config(args.run_dir)
