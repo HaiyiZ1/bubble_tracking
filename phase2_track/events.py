@@ -22,7 +22,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from .schemas import (
+from bubble_common.schemas import (
     BoundingBox,
     FrameData,
     TrackedObject,

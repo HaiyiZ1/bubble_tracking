@@ -34,6 +34,8 @@ from .schemas import (
     DEBOUNCE_DEATH_FRAMES,
     SAM2_FILL_HOLE_AREA,
     SAM2_MODELS,
+)
+from bubble_common.schemas import (
     PreprocessConfig,
     SegmentationConfig,
     DebounceConfig,
@@ -72,9 +74,7 @@ def _parse() -> argparse.Namespace:
 
 
 def main() -> None:
-    # Ensure the project root is on sys.path so phase1_preprocess is importable.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from phase1_preprocess.run_config import load as load_run_config, mark_phase_done
+    from bubble_common.run_config import load as load_run_config, mark_phase_done
 
     # Phase 2's own modules (lazy import to keep startup fast for --help).
     from .sam2 import (

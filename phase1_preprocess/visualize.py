@@ -28,7 +28,8 @@ from typing import Iterable, List
 import cv2
 import numpy as np
 
-from .preprocess import PreprocessConfig, preprocess_frame_with_debug
+from bubble_common.preprocess import preprocess_frame_with_debug
+from bubble_common.schemas import PreprocessConfig
 
 DEFAULT_KEYFRAME_INTERVAL = 160
 

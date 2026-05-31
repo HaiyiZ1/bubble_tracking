@@ -4,14 +4,13 @@ Translated from src/bubble_tracking/sam2_adapter.py and the
 _build_cv_keyframe_mask_prompts / _build_cv_extra_keyframe_prompts portions
 of scripts/run_sam2_prompted_flow.py.
 
-Self-contained: pulls frame_io helpers inline (sorted_frame_paths,
-save_mask) so Phase 2 has no cross-package imports.
+frame_io helpers (sorted_frame_paths, save_mask) and all dataclasses are
+imported from bubble_common/ as of the phase-boundary refactor.
 """
 
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +20,8 @@ import cv2
 import numpy as np
 import torch
 
-from .schemas import (
+from bubble_common.io import sorted_frame_paths, save_mask
+from bubble_common.schemas import (
     BoundingBox,
     FrameData,
     ObjectPrompt,
@@ -29,32 +29,10 @@ from .schemas import (
     PromptSpec,
     TrackedObject,
     TrackingResult,
-    SAM2_FILL_HOLE_AREA,
 )
+from .schemas import SAM2_FILL_HOLE_AREA
 
 _FRAME_EXTS = (".jpg", ".jpeg", ".png")
-
-
-def sorted_frame_paths(directory: str | Path) -> List[str]:
-    """Inlined from src/bubble_tracking/frame_io.py."""
-    d = Path(directory)
-    # Note: SAM2 requires .jpg format, but we support both for loading
-    pattern = re.compile(r"(\d+)\.(jpg|jpeg|png)$", re.IGNORECASE)
-    paths = []
-    for fname in os.listdir(str(d)):
-        match = pattern.search(fname)
-        if match:
-            paths.append((int(match.group(1)), str(d / fname)))
-    paths.sort(key=lambda x: x[0])
-    return [p[1] for p in paths]
-
-
-def save_mask(mask: np.ndarray, path: str | Path) -> None:
-    """Inlined from src/bubble_tracking/frame_io.py."""
-    output_path = str(path)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    # Save as 16-bit PNG to support many object IDs
-    cv2.imwrite(output_path, mask.astype(np.uint16))
 
 
 def compute_mask_properties(mask: np.ndarray, object_id: int) -> Optional[FrameData]:
@@ -461,11 +439,8 @@ def _build_cv_keyframe_mask_prompts(
     min_hole_area: int = 4,
     max_neg_points: int = 16,
 ) -> Tuple[PromptSpec, Optional[int], List[dict]]:
-    from .flow import preprocess_frame_with_debug  # lazy: phase2_track.flow built in C.5
-
-    from .schemas import PreprocessConfig, SegmentationConfig
-    # These are also importable from the top-level .schemas but we re-import
-    # here for clarity in case the caller already did so elsewhere.
+    from bubble_common.preprocess import preprocess_frame_with_debug
+    from bubble_common.schemas import PreprocessConfig, SegmentationConfig
 
     if keyframe_interval <= 0:
         raise ValueError("--cv-keyframe-interval must be > 0")
@@ -534,10 +509,10 @@ def _build_cv_keyframe_mask_prompts(
                     )
                     gray = clahe.apply(gray)
             else:
-                from .flow import preprocess_frame  # lazy: phase2_track.flow built in C.5
+                from bubble_common.preprocess import preprocess_frame
                 gray = preprocess_frame(frame_crop, ref_crop, preprocess_cfg)
 
-            from .flow import segment_frame  # lazy: phase2_track.flow built in C.5
+            from bubble_common.segment import segment_frame
             labels, components = segment_frame(gray, segment_cfg)
             if not components:
                 continue
@@ -647,9 +622,8 @@ def _build_cv_extra_keyframe_prompts(
     max_neg_points: int = 16,
 ) -> Tuple[List[ObjectPrompt], List[dict]]:
     """Build CV keyframe prompts at explicit frame indices (no within-window search)."""
-    from .flow import preprocess_frame_with_debug  # lazy: phase2_track.flow built in C.5
-
-    from .schemas import PreprocessConfig, SegmentationConfig
+    from bubble_common.preprocess import preprocess_frame_with_debug
+    from bubble_common.schemas import PreprocessConfig, SegmentationConfig
 
     preprocess_cfg = PreprocessConfig(
         mode=preprocess_mode,
@@ -705,10 +679,10 @@ def _build_cv_extra_keyframe_prompts(
                 )
                 gray = clahe.apply(gray)
         else:
-            from .flow import preprocess_frame  # lazy: phase2_track.flow built in C.5
+            from bubble_common.preprocess import preprocess_frame
             gray = preprocess_frame(frame_crop, ref_crop, preprocess_cfg)
 
-        from .flow import segment_frame  # lazy: phase2_track.flow built in C.5
+        from bubble_common.segment import segment_frame
         labels, components = segment_frame(gray, segment_cfg)
         if not components:
             out_logs.append({"extra_idx": int(idx), "status": "no_cv_mask"})

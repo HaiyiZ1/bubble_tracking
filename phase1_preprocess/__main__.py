@@ -20,10 +20,10 @@ import cv2
 
 from .frame_prep import prepare
 from .meta import load_case
-from .preprocess import PreprocessConfig
 from .roi import import_roi, interactive_select
-from .run_config import RunConfig
 from .visualize import DEFAULT_KEYFRAME_INTERVAL, keyframe_indices_for, render_previews
+from bubble_common.schemas import PreprocessConfig
+from bubble_common.run_config import RunConfig
 
 
 def _parse() -> argparse.Namespace:

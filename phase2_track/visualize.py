@@ -21,7 +21,7 @@ from typing import Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from .schemas import TrackingResult
+from bubble_common.schemas import TrackingResult
 
 
 # ---------------------------------------------------------------------------
