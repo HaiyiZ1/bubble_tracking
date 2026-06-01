@@ -88,8 +88,7 @@ python -m phase1_preprocess --case case1.air1 \
   --run-dir outputs/case1_air1_publish \
   --roi-from data/interim/bubbles_air1_072_271/roi_0p5.json \
   --roi-mask-from data/interim/bubbles_air1_072_271/roi_mask_0p5.png \
-  --cv-keyframe-start-idx 10 \
-  --cv-keyframe-normalize-lightmap
+  --cv-keyframe-start-idx 10
 
 # Case 2 (Low Porosity Air1)
 python -m phase1_preprocess --case case2.air1 \
@@ -97,8 +96,7 @@ python -m phase1_preprocess --case case2.air1 \
   --run-dir outputs/case2_air1_publish \
   --roi-from data/interim/case2_air1/roi_0p5.json \
   --roi-mask-from data/interim/case2_air1/roi_mask_0p5.png \
-  --cv-keyframe-start-idx 2 \
-  --cv-keyframe-normalize-lightmap
+  --cv-keyframe-start-idx 2
 
 # Case 3 (Medium Porosity Air1)
 python -m phase1_preprocess --case case3.air1 \
@@ -106,8 +104,7 @@ python -m phase1_preprocess --case case3.air1 \
   --run-dir outputs/case3_air1_publish \
   --roi-from data/interim/case3_air1/roi_0p5.json \
   --roi-mask-from data/interim/case3_air1/roi_mask_0p5.png \
-  --cv-keyframe-start-idx 10 \
-  --cv-keyframe-normalize-lightmap
+  --cv-keyframe-start-idx 10
 ```
 
 To select ROI interactively (omit `--roi-from` / `--roi-mask-from`); the phase will open an interactive picker and save the results into the run directory.
@@ -163,7 +160,7 @@ python -m phase3_postprocess --run-dir outputs/case3_air1_publish
 | 1 | `--cv-keyframe-start-idx` | First keyframe index (1-based, relabeled) |
 | 1 | `--cv-keyframe-threshold-offset` | CV threshold offset; default 7 |
 | 1 | `--cv-keyframe-min-area` | Min connected-component area in CV keyframe prompt; default 50 |
-| 1 | `--cv-keyframe-normalize-lightmap` | Enable light-map normalization (default off; pass to match historical case1/2/3 outputs) |
+| 1 | `--cv-keyframe-normalize-lightmap` | Enable light-map normalization in CV-keyframe preprocessing (default off) |
 | 1 | `--cv-keyframe-extra-indices` | Additional manual keyframes alongside the regular interval |
 | 2 | `--run-dir` | Run directory from Phase 1 |
 | 2 | `--sam2-model` | One of `tiny`, `small`, `base_plus`, `large` |
