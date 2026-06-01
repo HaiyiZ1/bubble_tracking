@@ -26,7 +26,15 @@ python scripts/check_env.py
 ```
 
 Required checkpoints in `checkpoints/`:
-- `sam2_hiera_tiny.pt`
+
+| Model | Download |
+|---|---|
+| `sam2_hiera_tiny.pt` | https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_tiny.pt |
+| `sam2_hiera_small.pt` | https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_small.pt |
+| `sam2_hiera_base_plus.pt` | https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_base_plus.pt |
+| `sam2_hiera_large.pt` | https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt |
+
+The v1 publishing re-runs for Case 2 and Case 3 require `base_plus`. Download all four if reproducing from scratch.
 
 ## Datasets
 
@@ -42,328 +50,121 @@ Original, compressed and key frame debug image data:
 | Case 3 keyframe debug artifacts | `https://unisydneyedu-my.sharepoint.com/:u:/g/personal/xdin9349_uni_sydney_edu_au/IQAjNRhfyIisSoQX9E8iyzRhAbP5gJnCsUIRlge_Q9wHLnw?e=k9eKBN` |
 | ROI masks | `https://unisydneyedu-my.sharepoint.com/:u:/g/personal/xdin9349_uni_sydney_edu_au/IQAjNRhfyIisSoQX9E8iyzRhAbP5gJnCsUIRlge_Q9wHLnw?e=k9eKBN` |
 
-## Publishing Reproduction Workflow (Case1/2/3 Air1)
+## meta.yaml schema
 
-### 1) Prepare publishing datasets
+`meta.yaml` (repo root) is the source of truth for per-case calibration. Key fields:
 
-If you downloaded public links for `case*_air1_publish`, place these folders under `data/bubbles/`:
-- `data/bubbles/case1_air1_publish`
-- `data/bubbles/case2_air1_publish`
-- `data/bubbles/case3_air1_publish`
+- Top-level `fps: 4` — acquisition frame rate used by Phase 3 for time/velocity conversion.
+- Per-case `scale: {mm: <float>, pixel: <float>}` — spatial calibration; Phase 3 derives `mm_per_pixel` from this automatically.
+- Per-air `start_frame` — frame index offset per air condition.
 
-Each folder must contain:
-- `frames/`
-- `frames_0p5/`
+There are no `--mm-per-pixel` or `--fps` CLI flags in the new pipeline.
 
-If only raw datasets are available, generate these publish folders with:
+## Publishing Reproduction Workflow (Case 1/2/3 Air1)
+
+The pipeline is split into three self-contained phases. Run them in order for each case.
+
+### Determinism
+
+Phase 2 (SAM2 tracking) produces byte-identical `sam2_masks/`, `tracks.csv`, and `events.json` across runs only when these env vars are set:
 
 ```bash
-python scripts/relabel_publishing_air1.py --case case1_air1 case2_air1 case3_air1
+export PYTHONHASHSEED=0
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
 ```
 
-### 2) Prepare ROI files (required)
+`CUBLAS_WORKSPACE_CONFIG=:4096:8` pins the cuBLAS workspace to a fixed size, preventing the non-deterministic algorithm selection that SAM2's attention kernels would otherwise trigger. Set these once per shell session before running Phase 2, or prefix them inline on each Phase 2 invocation as shown below.
 
-The datasets include a set of ROI files used in this study. The `.png` files are used for visual reference while the `.json` files are used in the extraction pipeline later.
+### Phase 1 — Preprocess
 
-If ROI files are not available, create them interactively (press Enter to confirm selections):
+Downscales frames, applies ROI, and builds CV-keyframe prompts. Writes preprocessed frames, ROI files, and `cv_keyframe_prompts/` + `cv_keyframe_debug/` into `<run-dir>/phase1/`.
 
-```bash
-python scripts/select_roi.py \
-  --frames data/bubbles/case1_air1_publish/frames_0p5 \
-  --frame-idx 1 \
-  --out data/interim/case1_air1/roi_0p5.json
-
-python scripts/select_polygon_roi.py \
-  --frames data/bubbles/case1_air1_publish/frames_0p5 \
-  --frame-idx 1 \
-  --out-json data/interim/case1_air1/roi_poly_0p5.json \
-  --out-mask data/interim/case1_air1/roi_mask_0p5.png
-
-python scripts/select_roi.py \
-  --frames data/bubbles/case2_air1_publish/frames_0p5 \
-  --frame-idx 1 \
-  --out data/interim/case2_air1/roi_0p5.json
-
-python scripts/select_polygon_roi.py \
-  --frames data/bubbles/case2_air1_publish/frames_0p5 \
-  --frame-idx 1 \
-  --out-json data/interim/case2_air1/roi_poly_0p5.json \
-  --out-mask data/interim/case2_air1/roi_mask_0p5.png
-
-python scripts/select_roi.py \
-  --frames data/bubbles/case3_air1_publish/frames_0p5 \
-  --frame-idx 1 \
-  --out data/interim/case3_air1/roi_0p5.json
-
-python scripts/select_polygon_roi.py \
-  --frames data/bubbles/case3_air1_publish/frames_0p5 \
-  --frame-idx 1 \
-  --out-json data/interim/case3_air1/roi_poly_0p5.json \
-  --out-mask data/interim/case3_air1/roi_mask_0p5.png
-```
-
-### 3) Run tracking with CV keyframe prompts and debug outputs
-
-#### Case 1 (High Porosity-Air1)
+**Phase 1 runs in seconds (no GPU).** Preview `phase1/cv_keyframe_debug/` images to verify keyframe quality before committing GPU time to Phase 2. Iterating on `--cv-keyframe-threshold-offset`, `--cv-keyframe-min-area`, or `--cv-keyframe-extra-indices` only requires re-running Phase 1.
 
 ```bash
-python scripts/run_sam2_prompted_flow.py \
-  --frames data/bubbles/case1_air1_publish/frames_0p5 \
-  --reference data/bubbles/case1_air1_publish/frames_0p5/000001.jpg \
-  --output outputs/case1_air1_publish \
-  --roi data/interim/case1_air1/roi_0p5.json \
-  --roi-mask data/interim/case1_air1/roi_mask_0p5.png \
-  --prompt-mode sam2 \
-  --sam2-checkpoint checkpoints/sam2_hiera_tiny.pt \
-  --sam2-model-cfg sam2_hiera_t.yaml \
-  --sam2-device cuda \
-  --cv-keyframe-prompts \
-  --cv-keyframe-interval 160 \
-  --cv-keyframe-start-idx 10 \
-  --cv-keyframe-preprocess-mode default \
-  --cv-keyframe-diff-sigma 0.5 \
-  --cv-keyframe-no-normalize \
-  --cv-keyframe-min-area 50 \
-  --cv-keyframe-threshold-offset 7 \
-  --cv-keyframe-debug-dir outputs/case1_air1_publish_debug \
-  --use-flow \
-  --velocity-mode centroid_delta \
-  --preprocess-mode raw \
-  --preprocess-raw-sigma 1.0 \
-  --debounce-birth-frames 2 \
-  --debounce-death-frames 3 \
-  --fps 4 \
-  --mm-per-pixel 0.08563
-```
-
-#### Case 2 (Low Porosity-Air1)
-
-```bash
-python scripts/run_sam2_prompted_flow.py \
-  --frames data/bubbles/case2_air1_publish/frames_0p5 \
-  --reference data/bubbles/case2_air1_publish/frames_0p5/000001.jpg \
-  --output outputs/case2_air1_publish \
-  --roi data/interim/case2_air1/roi_0p5.json \
-  --roi-mask data/interim/case2_air1/roi_mask_0p5.png \
-  --prompt-mode sam2 \
-  --sam2-checkpoint checkpoints/sam2_hiera_tiny.pt \
-  --sam2-model-cfg sam2_hiera_t.yaml \
-  --sam2-device cuda \
-  --cv-keyframe-prompts \
-  --cv-keyframe-interval 160 \
-  --cv-keyframe-start-idx 2 \
-  --cv-keyframe-preprocess-mode default \
-  --cv-keyframe-diff-sigma 0.5 \
-  --cv-keyframe-no-normalize \
-  --cv-keyframe-min-area 50 \
-  --cv-keyframe-threshold-offset 7 \
-  --cv-keyframe-debug-dir outputs/case2_air1_publish_debug \
-  --use-flow \
-  --velocity-mode centroid_delta \
-  --preprocess-mode raw \
-  --preprocess-raw-sigma 1.0 \
-  --debounce-birth-frames 2 \
-  --debounce-death-frames 3 \
-  --fps 4 \
-  --mm-per-pixel 0.08695
-```
-
-#### Case 3 (Medium Porosity-Air1)
-
-```bash
-python scripts/run_sam2_prompted_flow.py \
-  --frames data/bubbles/case3_air1_publish/frames_0p5 \
-  --reference data/bubbles/case3_air1_publish/frames_0p5/000001.jpg \
-  --output outputs/case3_air1_publish \
-  --roi data/interim/case3_air1/roi_0p5.json \
-  --roi-mask data/interim/case3_air1/roi_mask_0p5.png \
-  --prompt-mode sam2 \
-  --sam2-checkpoint checkpoints/sam2_hiera_tiny.pt \
-  --sam2-model-cfg sam2_hiera_t.yaml \
-  --sam2-device cuda \
-  --cv-keyframe-prompts \
-  --cv-keyframe-interval 160 \
-  --cv-keyframe-start-idx 10 \
-  --cv-keyframe-preprocess-mode default \
-  --cv-keyframe-diff-sigma 0.5 \
-  --cv-keyframe-no-normalize \
-  --cv-keyframe-min-area 50 \
-  --cv-keyframe-threshold-offset 7 \
-  --cv-keyframe-debug-dir outputs/case3_air1_publish_debug \
-  --use-flow \
-  --velocity-mode centroid_delta \
-  --preprocess-mode raw \
-  --preprocess-raw-sigma 1.0 \
-  --debounce-birth-frames 2 \
-  --debounce-death-frames 3 \
-  --fps 4 \
-  --mm-per-pixel 0.08264
-```
-
-### 4) Export publishing overlay videos
-
-```bash
-python scripts/export_publishing_tracking_video.py \
-  --case case1_air1 \
+# Case 1 (High Porosity Air1)
+python -m phase1_preprocess --case case1.air1 \
+  --raw-frames data/bubbles/case1_air1_publish/frames \
   --run-dir outputs/case1_air1_publish \
-  --frames data/bubbles/case1_air1_publish/frames_0p5
+  --roi-from data/interim/bubbles_air1_072_271/roi_0p5.json \
+  --roi-mask-from data/interim/bubbles_air1_072_271/roi_mask_0p5.png \
+  --cv-keyframe-start-idx 10
 
-python scripts/export_publishing_tracking_video.py \
-  --case case2_air1 \
+# Case 2 (Low Porosity Air1)
+python -m phase1_preprocess --case case2.air1 \
+  --raw-frames data/bubbles/case2_air1_publish/frames \
   --run-dir outputs/case2_air1_publish \
-  --frames data/bubbles/case2_air1_publish/frames_0p5
+  --roi-from data/interim/case2_air1/roi_0p5.json \
+  --roi-mask-from data/interim/case2_air1/roi_mask_0p5.png \
+  --cv-keyframe-start-idx 2
 
-python scripts/export_publishing_tracking_video.py \
-  --case case3_air1 \
+# Case 3 (Medium Porosity Air1)
+python -m phase1_preprocess --case case3.air1 \
+  --raw-frames data/bubbles/case3_air1_publish/frames \
   --run-dir outputs/case3_air1_publish \
-  --frames data/bubbles/case3_air1_publish/frames_0p5
+  --roi-from data/interim/case3_air1/roi_0p5.json \
+  --roi-mask-from data/interim/case3_air1/roi_mask_0p5.png \
+  --cv-keyframe-start-idx 10
 ```
 
-Each run writes:
-- `tracking_overlay_publish_1x.mp4`
-- `tracking_overlay_publish_10x.mp4`
+To select ROI interactively (omit `--roi-from` / `--roi-mask-from`); the phase will open an interactive picker and save the results into the run directory.
 
-## Flag Meanings (`scripts/run_sam2_prompted_flow.py`)
+### Phase 2 — Track
 
-| Flag | Meaning |
-|---|---|
-| `--frames` | Ordered frame directory used as input sequence. |
-| `--reference` | Zero-bubble reference frame for preprocessing/flow comparison. |
-| `--output` | Output run directory for masks, tracks, events, summaries, and videos. |
-| `--roi` | Rectangular ROI JSON (`x1,y1,x2,y2`). |
-| `--roi-mask` | Polygon ROI mask PNG used for in-ROI filtering. |
-| `--prompt-mode sam2` | Use SAM2 prompt/propagation path. |
-| `--sam2-checkpoint` | SAM2 checkpoint file path. |
-| `--sam2-model-cfg` | SAM2 config name/path (for example `sam2_hiera_b+.yaml`). |
-| `--sam2-device` | Inference device (`cuda` or `cpu`). |
-| `--cv-keyframe-prompts` | Enable CV-derived keyframe masks as SAM2 prompts. |
-| `--cv-keyframe-interval` | Keyframe spacing (in frames). |
-| `--cv-keyframe-start-idx` | First keyframe index for prompting in relabeled data. |
-| `--cv-keyframe-preprocess-mode` | Preprocess mode for keyframe prompt generation (`raw/default/automatrix`). |
-| `--cv-keyframe-diff-sigma` | Gaussian sigma applied to keyframe diff image. |
-| `--cv-keyframe-no-normalize` | Disable normalization in keyframe CV preprocessing. |
-| `--cv-keyframe-min-area` | Minimum component area kept as prompt mask. |
-| `--cv-keyframe-threshold-offset` | Threshold offset used by CV keyframe segmentation. |
-| `--cv-keyframe-debug-dir` | Directory for keyframe debug artifacts (preprocessed image, mask, overlay). |
-| `--use-flow` | Enable optical-flow-assisted association/tracking. |
-| `--velocity-mode centroid_delta` | Compute velocity from centroid displacement between linked frames. |
-| `--preprocess-mode raw` | Tracking-stage preprocessing mode. |
-| `--preprocess-raw-sigma` | Gaussian smoothing sigma used by `raw` preprocessing mode. |
-| `--debounce-birth-frames` | Require N consecutive detections before confirming object birth. |
-| `--debounce-death-frames` | Require N consecutive misses before confirming object death. |
-| `--fps` | Acquisition frame rate used for time/velocity conversion. |
-| `--mm-per-pixel` | Spatial calibration scale (mm per pixel). |
+Reads CV-keyframe prompts written by Phase 1, runs SAM2 propagation and flow tracking. Writes `sam2_masks/`, `tracks.csv`, `events.json` into `<run-dir>/phase2/`.
 
-## Additional Visualization Commands
-
-These are optional post-processing commands commonly used for reviewer-facing figures/tables.
-
-### Velocity overlay videos from completed runs
+Set determinism env vars before running (see Determinism section above), or prefix inline:
 
 ```bash
-python scripts/export_velocity_overlay.py \
+# Case 1 (High Porosity Air1)
+PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m phase2_track \
   --run-dir outputs/case1_air1_publish \
-  --frames data/bubbles/case1_air1_publish/frames_0p5 \
-  --output outputs/case1_air1_publish/velocity_overlay.mp4 \
-  --fps 4 \
-  --label-units mm_s
+  --sam2-model tiny \
+  --no-sam2-offload-video-to-cpu
 
-python scripts/export_velocity_overlay.py \
+# Case 2 (Low Porosity Air1)
+PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m phase2_track \
   --run-dir outputs/case2_air1_publish \
-  --frames data/bubbles/case2_air1_publish/frames_0p5 \
-  --output outputs/case2_air1_publish/velocity_overlay.mp4 \
-  --fps 4 \
-  --label-units mm_s
+  --sam2-model base_plus \
+  --no-sam2-offload-video-to-cpu
 
-python scripts/export_velocity_overlay.py \
+# Case 3 (Medium Porosity Air1)
+PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m phase2_track \
   --run-dir outputs/case3_air1_publish \
-  --frames data/bubbles/case3_air1_publish/frames_0p5 \
-  --output outputs/case3_air1_publish/velocity_overlay.mp4 \
-  --fps 4 \
-  --label-units mm_s
+  --sam2-model base_plus \
+  --no-sam2-offload-video-to-cpu
 ```
 
-### Vanished-area moving-window plots (2s and 5s)
+### Phase 3 — Postprocess
+
+Computes velocity/area metrics, generates figures, and exports overlay videos. Reads from `<run-dir>/` and writes outputs to `<run-dir>/phase3/`.
 
 ```bash
-python scripts/plot_vanished_area_moving_window.py --run-dir outputs/case1_air1_publish
-python scripts/plot_vanished_area_moving_window.py --run-dir outputs/case2_air1_publish
-python scripts/plot_vanished_area_moving_window.py --run-dir outputs/case3_air1_publish
+python -m phase3_postprocess --run-dir outputs/case1_air1_publish
+python -m phase3_postprocess --run-dir outputs/case2_air1_publish
+python -m phase3_postprocess --run-dir outputs/case3_air1_publish
 ```
 
-### Velocity normalization and area scatter figures
+**Output path migration note:** Consumers reading `bubble_velocity_area_metrics.csv` or other summary files directly from `<run-dir>/` (the legacy layout) must migrate to `<run-dir>/phase3/`.
 
-1. Generate `bubble_velocity_area_metrics.csv` plus base histogram/scatter plots:
+## Flag Meanings
 
-```bash
-python scripts/plot_velocity_norm_summary.py \
-  --run-dir outputs/case1_air1_publish \
-  --output-dir outputs/case1_air1_publish \
-  --v-ref-1 0.23 \
-  --v-ref-2 7.0
-
-python scripts/plot_velocity_norm_summary.py \
-  --run-dir outputs/case2_air1_publish \
-  --output-dir outputs/case2_air1_publish \
-  --v-ref-1 0.23 \
-  --v-ref-2 7.0
-
-python scripts/plot_velocity_norm_summary.py \
-  --run-dir outputs/case3_air1_publish \
-  --output-dir outputs/case3_air1_publish \
-  --v-ref-1 0.23 \
-  --v-ref-2 7.0
-```
-
-2. Generate log-log scatter with marginal PDFs from the metrics CSV:
-
-```bash
-python scripts/plot_velocity_area_logxy_with_marginal_pdfs.py \
-  --run-dir outputs/case1_air1_publish \
-  --x-column max_v_over_v_ref_1 \
-  --v-ref-index 1 \
-  --v-ref-value 0.23 \
-  --output outputs/case1_air1_publish/velocity_area_scatter_logxy_vref1_with_pdfs.png
-
-python scripts/plot_velocity_area_logxy_with_marginal_pdfs.py \
-  --run-dir outputs/case2_air1_publish \
-  --x-column max_v_over_v_ref_1 \
-  --v-ref-index 1 \
-  --v-ref-value 0.23 \
-  --output outputs/case2_air1_publish/velocity_area_scatter_logxy_vref1_with_pdfs.png
-
-python scripts/plot_velocity_area_logxy_with_marginal_pdfs.py \
-  --run-dir outputs/case3_air1_publish \
-  --x-column max_v_over_v_ref_1 \
-  --v-ref-index 1 \
-  --v-ref-value 0.23 \
-  --output outputs/case3_air1_publish/velocity_area_scatter_logxy_vref1_with_pdfs.png
-
-# Optional second reference velocity view (v_ref_2 = 7.0 mm/s)
-python scripts/plot_velocity_area_logxy_with_marginal_pdfs.py \
-  --run-dir outputs/case1_air1_publish \
-  --x-column max_v_over_v_ref_2 \
-  --v-ref-index 2 \
-  --v-ref-value 7.0 \
-  --output outputs/case1_air1_publish/velocity_area_scatter_logxy_vref2_with_pdfs.png
-
-python scripts/plot_velocity_area_logxy_with_marginal_pdfs.py \
-  --run-dir outputs/case2_air1_publish \
-  --x-column max_v_over_v_ref_2 \
-  --v-ref-index 2 \
-  --v-ref-value 7.0 \
-  --output outputs/case2_air1_publish/velocity_area_scatter_logxy_vref2_with_pdfs.png
-
-python scripts/plot_velocity_area_logxy_with_marginal_pdfs.py \
-  --run-dir outputs/case3_air1_publish \
-  --x-column max_v_over_v_ref_2 \
-  --v-ref-index 2 \
-  --v-ref-value 7.0 \
-  --output outputs/case3_air1_publish/velocity_area_scatter_logxy_vref2_with_pdfs.png
-```
-
-### Case-level max-velocity summary CSV exports
-
-```bash
-python scripts/export_bubble_max_velocity_summary.py --output-dir outputs
-```
+| Phase | Flag | Meaning |
+|---|---|---|
+| 1 | `--case` | meta.yaml lookup key, e.g. `case1.air1` |
+| 1 | `--raw-frames` | Input frames directory (relabeled or raw) |
+| 1 | `--run-dir` | Output run directory root |
+| 1 | `--meta` | meta.yaml path (default `./meta.yaml`) |
+| 1 | `--downscale` | Resize factor; default 0.5 |
+| 1 | `--roi-from`, `--roi-mask-from` | Skip interactive ROI selection by importing existing files |
+| 1 | `--cv-keyframe-start-idx` | First keyframe index (1-based, relabeled) |
+| 1 | `--cv-keyframe-threshold-offset` | CV threshold offset; default 7 |
+| 1 | `--cv-keyframe-min-area` | Min connected-component area in CV keyframe prompt; default 50 |
+| 1 | `--cv-keyframe-normalize-lightmap` | Enable light-map normalization in CV-keyframe preprocessing (default off) |
+| 1 | `--cv-keyframe-extra-indices` | Additional manual keyframes alongside the regular interval |
+| 2 | `--run-dir` | Run directory from Phase 1 |
+| 2 | `--sam2-model` | One of `tiny`, `small`, `base_plus`, `large` |
+| 2 | `--device` | `cuda` / `cpu`; auto-detect default |
+| 2 | `--no-sam2-offload-video-to-cpu` | Disable CPU offload (default: on for OOM safety) |
+| 3 | `--run-dir` | Run directory from Phase 2 |
+| 3 | `--v-ref-1`, `--v-ref-2` | Reference velocities for normalization (defaults 0.23, 7.0) |
